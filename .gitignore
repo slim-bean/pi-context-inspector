@@ -1,0 +1,10 @@
+node_modules/
+.pi/mcp.json
+.env
+.env.*
+.DS_Store
+__pycache__/
+*.log
+*.tgz
+*.context-export.json
+*.context-revisions/
