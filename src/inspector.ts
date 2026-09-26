@@ -1,24 +1,23 @@
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { Input, SelectList, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from "@earendil-works/pi-tui";
 import { jsonText, type Section, type Snapshot } from "./snapshots.ts";
+import { formatEstimate } from "./metrics.ts";
+import { paint, terminalLine, tokenTone } from "./presentation.ts";
+export { terminalText } from "./presentation.ts";
 
 export interface ViewState {
   tab: number;
   sectionId?: string;
   query: string;
   raw: boolean;
+  sorted: boolean;
+  drillId?: string;
 }
 export type InspectorAction = {
   kind: "close" | "refresh" | "copy" | "export" | "edit" | "undo";
   section?: Section;
   state: ViewState;
 };
-
-/** Do not replay escape sequences from tool results or files into the terminal. */
-export function terminalText(text: string): string {
-  return text.replace(/\r\n/g, "\n").replace(/\t/g, "    ")
-    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
-}
 
 export class Inspector implements Component, Focusable {
   private search = new Input({ prompt: "/ ", placeholder: "Search titles and full text" });
@@ -34,6 +33,7 @@ export class Inspector implements Component, Focusable {
   private wrappedKey = "";
   private wrapped: string[] = [];
   private note = "";
+  private largestEstimate = 0;
   readonly state: ViewState;
 
   constructor(
@@ -45,7 +45,7 @@ export class Inspector implements Component, Focusable {
     private done: (action: InspectorAction) => void,
     initial?: Partial<ViewState>,
   ) {
-    this.state = { tab: 0, query: "", raw: false, ...initial };
+    this.state = { tab: 0, query: "", raw: false, sorted: false, ...initial };
     this.search.setValue(this.state.query);
   }
 
@@ -55,18 +55,26 @@ export class Inspector implements Component, Focusable {
   private get selected(): Section | undefined { return this.filtered[this.index]; }
 
   private ensureList(): void {
-    const key = `${this.state.tab}:${this.state.query}:${this.bodyHeight}`;
+    const key = `${this.state.tab}:${this.state.query}:${this.bodyHeight}:${this.state.sorted}:${this.state.drillId}`;
     if (this.list && key === this.listKey) return;
     const query = this.state.query.toLowerCase();
-    this.filtered = this.snapshot.sections.filter((section) =>
+    const flatten = (sections: Section[]): Section[] => sections.flatMap((s) => [s, ...flatten(s.children ?? [])]);
+    const group = this.snapshot.sections.find((s) => s.id === this.state.drillId);
+    const sections = group?.children ?? this.snapshot.sections;
+    // Stable within a group: filtering/sorting must not change the size-color scale.
+    this.largestEstimate = sections.reduce((largest, s) => Math.max(largest, s.estimate?.tokens ?? 0), 0);
+    const candidates = query ? [...new Map(flatten(sections).map((s) => [s.id, s])).values()] : sections;
+    this.filtered = candidates.filter((section) =>
       `${section.title}\n${section.source}\n${section.text}`.toLowerCase().includes(query));
+    if (this.state.sorted) this.filtered.sort((a, b) => (b.sortTokens ?? b.estimate?.tokens ?? -1) - (a.sortTokens ?? a.estimate?.tokens ?? -1));
     this.index = Math.max(0, this.filtered.findIndex((section) => section.id === this.state.sectionId));
     this.list = new SelectList(this.filtered.map((section) => ({
       value: section.id,
-      label: `${section.status === "excluded" ? "−" : section.status === "reference" ? "·" : "+"} ${terminalText(section.title)}`,
+      label: `${this.statusMarker(section)} ${section.indicator ? this.theme.fg(section.indicator.tone, terminalLine(section.indicator.text)) + " " : ""}${section.estimate ? this.theme.fg(tokenTone(section.estimate.tokens, this.largestEstimate), formatEstimate(section.estimate)) + " " : ""}${paint(section.title, section.titleHighlights ?? [], this.theme, true)}${section.children?.length ? " ▸" : ""}`,
     })), this.bodyHeight, {
       selectedPrefix: (s) => this.theme.fg("accent", s),
-      selectedText: (s) => this.theme.fg("accent", s),
+      // Bold + the selection arrow preserve semantic foreground colors.
+      selectedText: (s) => this.theme.bold(s),
       description: (s) => this.theme.fg("muted", s),
       scrollInfo: (s) => this.theme.fg("dim", s),
       noMatch: (s) => this.theme.fg("muted", s),
@@ -74,6 +82,12 @@ export class Inspector implements Component, Focusable {
     this.list.setSelectedIndex(this.index);
     this.listKey = key;
     this.state.sectionId = this.selected?.id;
+  }
+
+  private statusMarker(section: Section): string {
+    const status = section.status;
+    return this.theme.fg(status === "included" ? "success" : status === "captured" ? "accent" : status === "excluded" ? "muted" : "dim",
+      status === "excluded" ? "−" : status === "reference" ? "·" : "+");
   }
 
   private move(amount: number): void {
@@ -104,13 +118,30 @@ export class Inspector implements Component, Focusable {
       }
     } else if (this.kb.matches(data, "tui.select.cancel") || data === "q") {
       this.finish("close"); return;
-    } else if (["1", "2", "3"].includes(data)) {
+    } else if (["1", "2", "3", "4", "5"].includes(data) && Number(data) <= this.snapshots.length) {
       this.state.tab = Number(data) - 1;
       this.state.sectionId = undefined;
+      this.state.drillId = undefined;
+      this.state.query = "";
+      this.search.setValue("");
       this.scroll = 0;
     } else if (data === "/") {
       this.searching = true;
       this.search.focused = this.focused;
+    } else if (matchesKey(data, "backspace") && this.state.drillId) {
+      this.state.sectionId = this.state.drillId;
+      this.state.drillId = undefined;
+      this.state.query = "";
+      this.search.setValue("");
+      this.focus = "list";
+      this.scroll = 0;
+    } else if (this.kb.matches(data, "tui.select.confirm") && this.selected?.children?.length) {
+      this.state.drillId = this.selected.id;
+      this.state.sectionId = undefined;
+      this.state.query = "";
+      this.search.setValue("");
+      this.focus = "list";
+      this.scroll = 0;
     } else if (matchesKey(data, "tab") || this.kb.matches(data, "tui.select.confirm")) {
       this.focus = this.focus === "list" ? "content" : "list";
     } else if (this.kb.matches(data, "tui.select.up") || data === "k") this.move(-1);
@@ -119,6 +150,7 @@ export class Inspector implements Component, Focusable {
     else if (this.kb.matches(data, "tui.select.pageDown")) this.move(this.bodyHeight);
     else if (matchesKey(data, "home")) this.move(-Number.MAX_SAFE_INTEGER);
     else if (matchesKey(data, "end")) this.move(Number.MAX_SAFE_INTEGER);
+    else if (data === "s") { this.state.sorted = !this.state.sorted; this.state.sectionId = undefined; this.scroll = 0; }
     else if (data === "r") { this.state.raw = !this.state.raw; this.scroll = 0; }
     else if (data === "f") { this.finish("refresh"); return; }
     else if (data === "y") { this.finish("copy"); return; }
@@ -139,14 +171,14 @@ export class Inspector implements Component, Focusable {
     this.bodyHeight = Math.max(1, height - 9);
     this.ensureList();
     const split = inner >= 90;
-    const leftWidth = split ? Math.min(38, Math.floor(inner * 0.32)) : inner;
+    const leftWidth = split ? Math.min(44, Math.floor(inner * 0.36)) : inner;
     const contentWidth = split ? inner - leftWidth - 3 : inner;
     const section = this.selected;
     const key = `${this.state.tab}:${section?.id}:${this.state.raw}:${contentWidth}`;
     if (key !== this.wrappedKey) {
       const text = section ? (this.state.raw ? jsonText(section.raw) : section.text)
         : this.snapshot.kind === "diff" ? "Two captured requests are needed to show a diff." : "No matching sections.";
-      this.wrapped = terminalText(text).split("\n").flatMap((line) => wrapTextWithAnsi(line, contentWidth));
+      this.wrapped = paint(text, this.state.raw ? [] : section?.highlights ?? [], this.theme).split("\n").flatMap((line) => wrapTextWithAnsi(line, contentWidth));
       this.wrappedKey = key;
     }
     this.scroll = Math.min(this.scroll, Math.max(0, this.wrapped.length - this.bodyHeight));
@@ -156,12 +188,15 @@ export class Inspector implements Component, Focusable {
       return clipped + " ".repeat(Math.max(0, w - visibleWidth(clipped)));
     };
     const row = (text: string) => truncateToWidth(`${th.fg("border", "│")}${pad(text, inner)}${th.fg("border", "│")}`, width);
-    const tabs = ["1 Preview", "2 Last request", "3 Changes"].map((label, i) => i === this.state.tab ? th.bold(th.fg("accent", label)) : th.fg("muted", label)).join("   ");
+    const labels = ["1 Preview", "2 Last request", "3 Changes", "4 Tools", "5 Growth"].slice(0, this.snapshots.length);
+    const tabs = inner >= 110
+      ? labels.map((label, i) => i === this.state.tab ? th.bold(th.fg("accent", label)) : th.fg("muted", label)).join("   ")
+      : `${th.bold(th.fg("accent", labels[this.state.tab] ?? labels[0]))} · 1–${labels.length} tabs`;
     const lines = [
       th.fg("border", `╭${"─".repeat(Math.max(0, width - 2))}╮`),
       row(` ${th.bold("Context inspector")}   ${tabs}`),
-      row(` ${th.fg("muted", terminalText(this.snapshot.description))}`),
-      row(this.searching ? this.search.render(inner)[0] : ` / Search: ${terminalText(this.state.query || "(all)")}   ${this.filtered.length} sections · focus: ${this.focus} · ${this.state.raw ? "raw JSON" : "text"}`),
+      row(` ${th.fg("muted", terminalLine(this.snapshot.description))}`),
+      row(this.searching ? this.search.render(inner)[0] : ` / Search: ${terminalLine(this.state.query || "(all)")} · ${this.filtered.length} sections · ${this.state.sorted ? "size ↓" : "default order"} · ${this.focus} · ${this.state.raw ? "raw" : "text"}${this.state.drillId ? " · Backspace: up" : ""}`),
       row(th.fg("dim", "─".repeat(inner))),
     ];
     const left = this.list!.render(leftWidth);
@@ -175,8 +210,8 @@ export class Inspector implements Component, Focusable {
       lines.push(row(split ? `${pad(left[i] ?? "", leftWidth)} ${th.fg("border", "│")} ${pad(content, contentWidth)}` : this.focus === "list" ? left[i] ?? "" : content));
     }
     lines.push(
-      row(th.fg("muted", terminalText(this.note || `${section?.status ?? ""} · ${section?.source ?? ""} · lines ${Math.min(this.scroll + 1, this.wrapped.length)}–${Math.min(this.scroll + this.bodyHeight, this.wrapped.length)}/${this.wrapped.length}`))),
-      row(th.fg("dim", "↑↓/j k navigate · Tab read/list · PgUp/Dn scroll · / search · r raw · f refresh")),
+      row(this.note ? th.fg("muted", terminalLine(this.note)) : `${section ? this.statusMarker(section) : ""} ${section?.status ?? ""}${section?.estimate ? " " + th.fg(tokenTone(section.estimate.tokens, this.largestEstimate), formatEstimate(section.estimate)) : ""}${th.fg("muted", terminalLine(` · ${section?.source ?? ""} · lines ${Math.min(this.scroll + 1, this.wrapped.length)}–${Math.min(this.scroll + this.bodyHeight, this.wrapped.length)}/${this.wrapped.length}`))}`),
+      row(th.fg("dim", "↑↓/j k · Tab read/list · Enter drill · Backspace up · / search · s size · r raw · f refresh")),
       row(th.fg("dim", "y copy · x export · e edit summary · u undo · Esc close")),
       th.fg("border", `╰${"─".repeat(Math.max(0, width - 2))}╯`),
     );

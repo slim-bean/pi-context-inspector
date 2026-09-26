@@ -1,6 +1,6 @@
 # pi-context-inspector
 
-A terminal-first pi extension for seeing session context and correcting saved compaction summaries. Tested with pi **0.85.1**, Node 22.19+.
+A terminal-first pi extension for inspecting context, profiling token/tool usage, and correcting saved compaction summaries. Tested with pi **0.85.1**, Node 22.19+.
 
 ## Install
 
@@ -12,7 +12,7 @@ Then run `/reload` in an existing pi session (or start a new one), followed by `
 
 ## Try a local checkout
 
-Run `npm ci --ignore-scripts`, start pi in the checkout, then use `/context`. In an existing session, run `/reload` first. The project-local `.pi/extensions/context.ts` entry point loads the extension; no global settings are changed.
+Run `npm ci --ignore-scripts`, then `pi -e ./src/index.ts` in the checkout and use `/context`. No global settings are changed. For an already-loaded extension, run `/reload` after changes.
 
 To load a local checkout from elsewhere:
 
@@ -22,7 +22,7 @@ pi -e /absolute/path/to/pi-context/src/index.ts
 pi install /absolute/path/to/pi-context
 ```
 
-Avoid loading both the project entry point and the installed package in the same session.
+Avoid loading both an explicit extension path and the installed package in the same session.
 
 ## Commands and overlay
 
@@ -31,22 +31,44 @@ Avoid loading both the project entry point and the installed package in the same
 | `/context` | Current context preview |
 | `/context request` | Last observed provider request |
 | `/context diff` | Diff of the last two observed requests |
+| `/context stats` | Tool usage, largest results, diagnostics, and call/result drill-down |
+| `/context growth` | Request input growth from recorded assistant responses |
 | `/context edit [entry-id]` | Edit the active compaction's Markdown, review, save and reopen |
 | `/context undo` | Review and undo the latest still-applied summary edit on this branch |
 | `/context export [path]` | Export preview and captures to a private JSON file; never overwrite |
 | `/context help` | Quick reference |
 
-Overlay keys: **1/2/3** tabs, **↑↓ / j k** select or scroll, **Tab / Enter** switch list/content focus, **PgUp/PgDn**, **Home/End**, **/** full-text filter, **r** raw JSON, **f** refresh, **y** copy section, **x** export, **e** edit selected compaction, **u** undo, **Esc / q** close. Narrow terminals show one pane at a time. Search Enter/Esc leaves search mode; clear the search text to reset the filter.
+Overlay keys: **1–5** tabs, **↑↓ / j k** select or scroll, **Tab** switch list/content focus, **Enter** drill into a tool/group (otherwise switch focus), **Backspace** return to groups, **s** toggle size sorting, **PgUp/PgDn**, **Home/End**, **/** full-text filter (including nested calls), **r** raw JSON, **f** refresh, **y** copy section, **x** export, **e** edit selected compaction, **u** undo, **Esc / q** close. Narrow terminals show one pane at a time. Search Enter/Esc leaves search mode; clear the search text to reset the filter. Switching tabs clears the filter.
 
 Editing uses pi's multiline editor, including **Ctrl+G** for an external editor. Enter submits to a separate diff review; **Enter there saves**, **Esc cancels**. Edits require an idle agent with no queued messages. Viewing never sends a model request or adds model context.
 
 ## What the views mean
 
-- **Preview** combines pi's current system prompt, base prompt sources, active tool schemas, and compaction-aware branch entries. Hidden extension messages are included; UI-only state, `!!` output, and summarized-away history are labeled separately. Sources are shown where pi exposes them. This is **not a final-request prediction**: hooks, image settings and provider conversion can change it.
+- **Preview** combines pi's current system prompt, base prompt sources, active tool schemas, and compaction-aware branch entries. **`+` included**, **`·` reference only**, **`−` excluded**: not everything displayed in the right pane is sent. Hidden extension messages are included; UI-only state, `!!` output, and summarized-away history are labeled separately. Sources are shown where pi exposes them. This is **not a final-request prediction**: hooks, image settings and provider conversion can change it.
 - **Last request** records `before_provider_request` without changing its payload. Later-loaded hooks can still modify it. Load this extension last when practical. Provider-private instructions and opaque reasoning cannot be decoded. Response token/cache usage is shown when observed.
 - **Changes** compares the last two captured payloads, not arbitrary historic requests. It is not an exact cache-hit forecast.
 
 Captures are memory-only, limited to the last two requests and **16 MiB each**. They clear on reload/resume (including summary edits). Oversized captures are explicitly skipped, never silently truncated. Large/expensive diffs fall back to an export suggestion. Text view abbreviates images; raw view and export retain the captured object. Raw terminal control characters are escaped for safe display.
+
+## Token and tool profiling
+
+**Preview** starts with a usage overview: pi's overall context estimate/window, a visible-content breakdown and percentages, and the largest included sections. Included rows have `~token` badges; **s** sorts largest first. Categories separate instructions, tool definitions, user/extension messages, assistant text, visible reasoning, call arguments/names, results, and summaries. Reference views and excluded history are not added to totals; raw storage metadata is not counted.
+
+**Color is semantic and follows your pi theme.** Included `+` markers use success color; reference `·` and excluded `−` stay muted. Token badges use accent, with warning color for values at least half the largest badge in the current group (a relative size cue, not a capacity alarm). Breakdown bars show each category's share of estimated visible tokens. Tool rows show `!` for recorded errors, `?` for diagnostic signals, and `…` for missing/unmatched results; only actual errors use error color. Growth increases use warning color, decreases use success color, and zero/unknown deltas are dim—direction, not a quality rating. Arguments/results and raw JSON stay neutral. Selection remains marked by an arrow and bold text; exports and clipboard text contain no generated ANSI.
+
+**Estimates are not exact token counts.** They use visible text characters / 4, rounded per block; tool definitions and arguments use compact JSON. This local, model-independent heuristic can differ substantially by language/model. Images and opaque blocks/signatures have unknown costs (`+ ?`), not base64-as-text costs. Provider framing and conversion are excluded. Pi's overall estimate uses a different method and need not equal this breakdown. Last request shows normalized **provider-reported input/cache/output** separately; arbitrary provider JSON is not assigned a misleading token total. Input includes uncached input + cache read + cache write; output is separate. Cached tokens still occupy context.
+
+**Tools** profiles the **active branch**, including summarized-away calls, not abandoned branches:
+- Per tool: call/result/error counts, generated arguments/results, currently retained call/result content, and mean/median/p95/largest result size. Tool schemas remain separate in Preview.
+- **Enter** a tool, Largest results, or Diagnostics to inspect individual call/result pairs; **Backspace** returns. Within call lists, **s** sorts by result size. Search finds nested calls too.
+- Each pair includes arguments, result, entry IDs, retained size, and provider request input **at call issuance**. This is the input that produced the call, before its result existed. Parallel calls share it: it is not a marginal tool cost.
+- Diagnostics flag exact repeated arguments, repeated/overlapping requested file ranges, large results (at least ~2k visible tokens), narrower follow-up reads, truncation/pagination, related errors followed by success, and similar search queries. Related-call checks look back 20 calls per tool and require an earlier completed result. Paths are compared lexically without reading files; read/query checks recognize common `path`/`offset`/`limit` and `query` arguments. Missing calls/results remain explicitly unmatched, not silently dropped.
+
+Signals are **investigation aids, not accuracy scores**. Re-reads may be necessary; text can falsely suggest truncation; a later successful call need not be a correction. Actual accuracy requires outcome checks. Nested calls hidden inside MCP scripts or shell commands cannot be individually attributed. Retained results can recur in later requests; these estimates do not invent cumulative billing costs.
+
+**Growth** reconstructs provider input/cache/output usage and input deltas from existing assistant responses on the active branch. Select a response for intervening tool-result estimates; **s** sorts by absolute input change. Comparisons reset across compaction, model changes, and missing/all-zero usage. Deltas include more than tool results and are not a causal attribution. This is not a log of every network retry, nested model call, or summarization request.
+
+Profiling makes no model calls, reads no extra files, and writes no telemetry or session entries. Tool/Growth views survive reload by recomputing from existing session data; wire captures still retain only two requests in memory. Confirmed JSON exports (format version 2) include the new views and may contain summarized-away tool content as well as current context.
 
 ## Editing, backups, and undo
 
@@ -83,6 +105,6 @@ npm test
 npm run test:tui
 ```
 
-Unit tests use temporary fixtures and do not create an authenticated runtime. The real-TUI smoke test uses a pseudo-terminal, a loopback-only fake provider, a temporary HOME and `PI_CODING_AGENT_DIR`, an empty auth file, an environment allowlist, and offline mode. It never reads your normal pi auth file or invokes 1Password. It exercises inspection, capture/diff/export, editing, cancellation, undo, and subsequent compaction. No real model calls or API charges.
+Unit tests use temporary fixtures and do not create an authenticated runtime. The real-TUI smoke test uses a pseudo-terminal, a loopback-only fake provider, a temporary HOME and `PI_CODING_AGENT_DIR`, an empty auth file, an environment allowlist, and offline mode. It never reads your normal pi auth file or invokes 1Password. It exercises estimates, tool profiling/drill-down/resize, growth, capture/diff/export, editing, cancellation, undo, and subsequent compaction. No real model calls or API charges.
 
 For manual isolated testing, use a temporary `PI_CODING_AGENT_DIR` **and** disable resource discovery or use a temporary working directory. `--offline` alone does not isolate credentials or prevent explicit model calls.

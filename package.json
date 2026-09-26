@@ -1,7 +1,7 @@
 {
   "name": "pi-context-inspector",
-  "version": "0.1.0",
-  "description": "Inspect pi session context and edit saved compaction summaries from a terminal overlay.",
+  "version": "0.2.0",
+  "description": "Inspect pi context, profile token/tool usage, and edit saved compaction summaries from a terminal overlay.",
   "repository": { "type": "git", "url": "https://github.com/slim-bean/pi-context-inspector.git" },
   "homepage": "https://github.com/slim-bean/pi-context-inspector#readme",
   "bugs": { "url": "https://github.com/slim-bean/pi-context-inspector/issues" },

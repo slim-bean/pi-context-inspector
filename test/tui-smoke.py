@@ -75,12 +75,12 @@ def main():
     session = temp / "fixture.jsonl"
     fixture = subprocess.check_output([
         NODE, "--import", "tsx", "--input-type=module", "-e",
-        'import { fixtureEntries } from "./test/fixtures.ts"; console.log(JSON.stringify(fixtureEntries(process.argv[1])));', str(project),
+        'import { fixtureEntries } from "./test/fixtures.ts"; console.log(JSON.stringify(fixtureEntries(process.argv[1], true)));', str(project),
     ], cwd=ROOT, env=env, timeout=15)
     entries = json.loads(fixture)
     session.write_text("".join(json.dumps(e) + "\n" for e in entries))
     original = next(e["summary"] for e in entries if e["type"] == "compaction")
-    command = [NODE, str(CLI), "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-themes", "--no-approve", "--provider", "context-test", "--model", "fixture", "--thinking", "off", "--session", str(session), "-e", str(ROOT / ".pi/extensions/context.ts")]
+    command = [NODE, str(CLI), "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-themes", "--no-approve", "--provider", "context-test", "--model", "fixture", "--thinking", "off", "--session", str(session), "-e", str(ROOT / "src/index.ts")]
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(project)
@@ -169,6 +169,32 @@ def main():
         send("\x1b")
         settle()
 
+        mark = command_line("/context stats")
+        wait_for("Tool usage overview", mark)
+        send("/Tool stats · read")
+        send("\r")  # leave search
+        mark = send("\r")  # drill into call/result pairs
+        wait_for("fixture-read-1", mark)
+        wait_for("Arguments + name:", mark)
+        send("s")
+        send("\t")
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 70, 0, 0))
+        os.kill(pid, signal.SIGWINCH)
+        settle()
+        send("\x1b[6~")
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 130, 0, 0))
+        os.kill(pid, signal.SIGWINCH)
+        settle()
+        send("\x7f")  # back to tool groups
+        mark = send("5")
+        wait_for("Request input growth", mark)
+        send("\x1b")
+        settle()
+        mark = command_line("/context growth")
+        wait_for("Request input growth", mark)
+        send("\x1b")
+        settle()
+
         exported = temp / "export.json"
         mark = command_line(f"/context export {exported}")
         wait_for("Export sensitive context?", mark)
@@ -178,7 +204,19 @@ def main():
             pump()
         assert exported.exists(), "export confirmation did not save"
         export = json.loads(exported.read_text())
+        assert export["version"] == 2
         assert len(export["requests"]) == 2
+        tool_stats = next(s["raw"] for s in export["tools"]["sections"] if s["id"] == "tool-stats:read")
+        assert tool_stats["calls"] == 2
+        assert tool_stats["resultSize"]["tokens"] > 2000
+        assert tool_stats["signals"]["Large result then narrower read"] == 1
+        assert export["growth"]["kind"] == "growth"
+        overview = export["preview"]["sections"][0]
+        assert overview["raw"]["estimate"]["tokens"] > 0
+        assert overview["highlights"] and "█" in overview["text"]
+        assert "\x1b" not in overview["text"], "Rendering must not embed ANSI in exports"
+        tool_group = next(s for s in export["tools"]["sections"] if s["id"] == "tool-stats:read")
+        assert tool_group["indicator"] == {"text": "?", "tone": "warning"}
         assert export["requests"][-1]["usage"]["cacheRead"] == 40
         assert any(s["id"] == "system" for s in export["preview"]["sections"])
         assert len(REQUESTS) == 2, "Inspection/export must not invoke the model"
@@ -241,7 +279,7 @@ def main():
         assert summary_requests, "Expected a real pi compaction request"
         assert "correct database" in json.dumps(summary_requests[-1])
         assert "WRONG database" not in json.dumps(summary_requests[-1])
-        print("PASS: real TUI inspection, request capture/diff/export, cancellation, edit/reopen, undo, subsequent model context and compaction.")
+        print("PASS: real TUI estimates, tool stats/drilldown/resize, growth, request capture/diff/export, cancellation, edit/reopen, undo, subsequent model context and compaction.")
         print("Auth isolation: temporary HOME + PI_CODING_AGENT_DIR, empty auth, env allowlist, offline startup, loopback fake provider only.")
         os.write(fd, b"/quit\r")
     except Exception:

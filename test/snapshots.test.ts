@@ -33,6 +33,17 @@ test("preview includes hidden messages and wrapped summary, distinguishes UI-onl
   assert.equal(snapshot.sections.find((s) => s.id === "ui-state")?.status, "excluded");
   assert.equal(snapshot.sections.find((s) => s.id === "excluded-bash")?.status, "excluded");
   assert.ok(snapshot.sections.find((s) => s.id === "omitted")?.text.includes("old-user"));
+  assert.ok(snapshot.description.startsWith("Pi context: ~100 / 1,000 (10.0%)"));
+  assert.equal(snapshot.sections[0].id, "context-overview");
+  assert.ok(snapshot.sections[0].text.includes("Reference only (not additional context)"));
+  assert.equal(snapshot.sections.find((s) => s.id === "prompt-inputs")?.estimate, undefined);
+  assert.equal(snapshot.sections.find((s) => s.id === "omitted")?.estimate, undefined);
+  assert.equal(snapshot.sections.find((s) => s.id === "excluded-bash")?.estimate, undefined);
+  const raw = snapshot.sections[0].raw as any;
+  assert.equal(raw.estimate.tokens, snapshot.sections.reduce((sum, section) => sum + (section.estimate?.tokens ?? 0), 0));
+  assert.equal(raw.categories["System instructions"].tokens, 4);
+  assert.ok(raw.categories["Tool definitions"].tokens > 0);
+  assert.ok(raw.categories["Compaction summary"].tokens > 0);
 });
 
 test("captures snapshot payloads without mutation; only last two are retained", () => {
@@ -45,6 +56,8 @@ test("captures snapshot payloads without mutation; only last two are retained", 
   const request = requestSnapshot(history);
   assert.ok(request.sections.some((s) => s.id === "messages:0" && s.text === "two"));
   assert.ok(request.sections.some((s) => s.id === "system"));
+  assert.equal(request.sections.find((s) => s.id === "payload")?.status, "reference");
+  assert.ok(request.sections[0].text.includes("unavailable"));
   const diff = diffSnapshot(history);
   assert.ok(diff.sections[0].text.includes('-      "content": "one"'));
   assert.ok(diff.sections[0].text.includes('+      "content": "two"'));

@@ -6,7 +6,7 @@ import { join } from "node:path";
 export const SUMMARY = "## Goal\nBuild a context inspector.\n\n## Decision\nUse the WRONG database.\n";
 export const CORRECTED = SUMMARY.replace("WRONG", "correct");
 export const usage = { input: 30, output: 5, cacheRead: 10, cacheWrite: 0, totalTokens: 45, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-export function fixtureEntries(cwd: string) {
+export function fixtureEntries(cwd: string, withTools = false) {
   const timestamp = "2026-01-01T00:00:00.000Z";
   const entry = (id: string, parentId: string | null, fields: object) => ({ id, parentId, timestamp, ...fields });
   const user = (content: string) => ({ role: "user", content, timestamp: 1 });
@@ -21,7 +21,13 @@ export function fixtureEntries(cwd: string) {
     entry("hidden", "compact", { type: "custom_message", customType: "fixture-injection", content: "Invisible in chat but sent to model", display: false }),
     entry("ui-state", "hidden", { type: "custom", customType: "fixture-state", data: { doNotSend: true } }),
     entry("excluded-bash", "ui-state", { type: "message", message: { role: "bashExecution", command: "echo SECRET", output: "SECRET", excludeFromContext: true, timestamp: 3 } }),
-    entry("latest", "excluded-bash", { type: "message", message: assistant("Ready for inspection") }),
+    ...(withTools ? [
+      entry("tool-assistant-1", "excluded-bash", { type: "message", message: { ...assistant("Reading"), content: [{ type: "toolCall", id: "fixture-read-1", name: "read", arguments: { path: "README.md", offset: 1, limit: 1000 } }], stopReason: "toolUse" } }),
+      entry("tool-result-1", "tool-assistant-1", { type: "message", message: { role: "toolResult", toolName: "read", toolCallId: "fixture-read-1", content: [{ type: "text", text: "Fixture text ".repeat(750) + "\nOutput truncated" }], details: { truncation: { truncated: true } }, isError: false, timestamp: 4 } }),
+      entry("tool-assistant-2", "tool-result-1", { type: "message", message: { ...assistant("Narrowing read"), content: [{ type: "toolCall", id: "fixture-read-2", name: "read", arguments: { path: "README.md", offset: 20, limit: 10 } }], stopReason: "toolUse" } }),
+      entry("tool-result-2", "tool-assistant-2", { type: "message", message: { role: "toolResult", toolName: "read", toolCallId: "fixture-read-2", content: [{ type: "text", text: "A smaller fixture result" }], isError: false, timestamp: 5 } }),
+    ] : []),
+    entry("latest", withTools ? "tool-result-2" : "excluded-bash", { type: "message", message: assistant("Ready for inspection") }),
   ];
 }
 export function fixture() {

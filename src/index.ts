@@ -8,6 +8,7 @@ import { Review } from "./review.ts";
 import { activeCompaction, buildPreview, diffSnapshot, jsonText, makeDiff, requestSnapshot, RequestHistory } from "./snapshots.ts";
 import { proposeEdit, proposeUndo, type EditProposal } from "./revisions.ts";
 import { errorText, saveAndReopen } from "./editing.ts";
+import { growthSnapshot, toolSnapshot } from "./profiler.ts";
 
 const OVERLAY = { overlay: true, overlayOptions: { width: "96%" as const, maxHeight: "96%" as const, margin: 1 } };
 
@@ -33,12 +34,14 @@ export default function contextInspector(pi: ExtensionAPI): void {
   async function exportContext(ctx: ExtensionCommandContext, requestedPath?: string): Promise<void> {
     const defaultPath = join(tmpdir(), "pi-context-exports", `${ctx.sessionManager.getSessionId()}-${randomUUID()}.context-export.json`);
     const path = resolve(ctx.cwd, requestedPath || defaultPath);
-    if (!await ctx.ui.confirm("Export sensitive context?", `Writes system instructions, conversation, tool schemas, and captured payloads to ${path}. This may include secrets and images. Nothing is uploaded.`)) return;
+    if (!await ctx.ui.confirm("Export sensitive context?", `Writes instructions, conversation, tool schemas, current/historical branch tool content, profiler statistics, and captured payloads to ${path}. This may include secrets and images. Nothing is uploaded.`)) return;
     const document = {
-      version: 1, exportedAt: new Date().toISOString(), sessionId: ctx.sessionManager.getSessionId(),
+      version: 2, exportedAt: new Date().toISOString(), sessionId: ctx.sessionManager.getSessionId(),
       leafId: ctx.sessionManager.getLeafId(), sessionFile: ctx.sessionManager.getSessionFile(),
       warning: "Preview is reconstructed; captures reflect this extension's hook, not necessarily later hooks or provider-private instructions.",
       preview: buildPreview(ctx, pi),
+      tools: toolSnapshot(ctx.sessionManager.getBranch(), ctx.sessionManager.buildContextEntries(), ctx.cwd),
+      growth: growthSnapshot(ctx.sessionManager.getBranch()),
       requests: [history.previous, history.latest].filter(Boolean).map((capture) => ({ ...capture, json: undefined })),
       captureWarning: history.warning,
     };
@@ -81,8 +84,8 @@ export default function contextInspector(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("context", {
-    description: "Inspect model context, capture requests, and edit saved compaction summaries",
-    getArgumentCompletions: (prefix) => ["request", "diff", "edit", "undo", "export", "help"]
+    description: "Inspect context, profile tokens/tools and request growth, and edit saved summaries",
+    getArgumentCompletions: (prefix) => ["request", "diff", "stats", "growth", "edit", "undo", "export", "help"]
       .filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") throw new Error("/context requires interactive TUI mode.");
@@ -96,16 +99,18 @@ export default function contextInspector(pi: ExtensionAPI): void {
         const [command] = input.split(/\s+/);
         const rest = input.slice(command.length).trim();
         if (command === "help") {
-          ctx.ui.notify("/context [request|diff|edit [entry-id]|undo|export [path]]\nOverlay: 1/2/3 tabs, Tab list/content, / search, r raw, y copy, x export, e edit, u undo. Captures are memory-only. Edits save backups and reopen the session.", "info");
+          ctx.ui.notify("/context [request|diff|stats|growth|edit [entry-id]|undo|export [path]]\nOverlay: 1–5 tabs, Tab list/content, Enter drill, Backspace up, s size sort, / search, r raw, y copy, x export, e edit, u undo. ~tokens are local estimates, not billing. Tool diagnostics are heuristics. Captures are memory-only. Edits save backups and reopen the session.", "info");
           return;
         }
         if (command === "edit") { await editSummary(ctx, rest || undefined); return; }
         if (command === "undo") { await undoSummary(ctx); return; }
         if (command === "export") { await exportContext(ctx, rest || undefined); return; }
-        if (command && command !== "request" && command !== "diff") throw new Error("Unknown /context command. Try /context help.");
-        let state: Partial<ViewState> = { tab: command === "request" ? 1 : command === "diff" ? 2 : 0 };
+        if (command && !["request", "diff", "stats", "growth"].includes(command)) throw new Error("Unknown /context command. Try /context help.");
+        let state: Partial<ViewState> = { tab: command === "request" ? 1 : command === "diff" ? 2 : command === "stats" ? 3 : command === "growth" ? 4 : 0 };
         for (;;) {
-          const snapshots = [buildPreview(ctx, pi), requestSnapshot(history), diffSnapshot(history)];
+          const branch = ctx.sessionManager.getBranch();
+          const snapshots = [buildPreview(ctx, pi), requestSnapshot(history), diffSnapshot(history),
+            toolSnapshot(branch, ctx.sessionManager.buildContextEntries(), ctx.cwd), growthSnapshot(branch)];
           const action = await ctx.ui.custom<InspectorAction>((tui, theme, kb, done) =>
             new Inspector(snapshots, theme, kb, () => tui.terminal.rows, () => tui.requestRender(), done, state), OVERLAY);
           if (!action || action.kind === "close") return;

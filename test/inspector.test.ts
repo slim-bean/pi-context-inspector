@@ -66,11 +66,63 @@ test("content scrolling, raw toggle, copy, tab switching, and close", () => {
   assert.equal(action?.kind, "close");
 });
 
+test("size sorting, tool drilldown/back navigation and nested search preserve refresh state", () => {
+  const tools: Snapshot = { kind: "tools", title: "Tools", description: "Local analysis", sections: [
+    { id: "overview", title: "Overview", status: "reference", source: "local", text: "Overview", raw: {} },
+    { id: "group", title: "Tool stats · read", status: "reference", source: "local", text: "Tool group", raw: {}, sortTokens: 500, children: [
+      { id: "small", title: "small read", status: "reference", source: "call", text: "small", raw: {}, estimate: { tokens: 10, images: 0, opaque: 0 }, sortTokens: 10 },
+      { id: "large", title: "large 日本語 read", status: "reference", source: "call", text: "nested-needle\x1b]52;evil\x07", raw: {}, estimate: { tokens: 10000, images: 1, opaque: 0 }, sortTokens: 10000 },
+    ] },
+  ] };
+  let action: InspectorAction | undefined;
+  const views = [snapshot, snapshot, snapshot, tools, { ...tools, kind: "growth" as const }];
+  const inspector = new Inspector(views, theme, kb, () => 30, () => {}, (value) => { action = value; });
+  inspector.render(130);
+  inspector.handleInput("4"); inspector.render(130);
+  inspector.handleInput("s"); inspector.render(130);
+  assert.equal(inspector.state.sectionId, "group");
+  inspector.handleInput("\r"); inspector.render(130);
+  assert.equal(inspector.state.drillId, "group");
+  assert.equal(inspector.state.sectionId, "large");
+  inspector.handleInput("f");
+  assert.equal(action?.state.sorted, true);
+  assert.equal(action?.state.drillId, "group");
+  const reopened = new Inspector(views, theme, kb, () => 30, () => {}, () => {}, action!.state);
+  assert.ok(reopened.render(130).some((line) => line.includes("nested-needle")));
+  assert.ok(reopened.render(130).every((line) => !line.includes("\x1b]52")));
+  reopened.handleInput("\x7f"); reopened.render(130);
+  assert.equal(reopened.state.drillId, undefined);
+  assert.equal(reopened.state.sectionId, "group");
+  reopened.handleInput("/");
+  for (const char of "nested-needle") reopened.handleInput(char);
+  reopened.render(130);
+  assert.equal(reopened.state.sectionId, "large");
+  reopened.handleInput("\r");
+  for (const width of [140, 90, 45, 10, 1]) {
+    assert.ok(reopened.render(width).every((line) => visibleWidth(line) <= width));
+    reopened.invalidate();
+  }
+  reopened.handleInput("5"); reopened.render(130);
+  assert.equal(reopened.state.query, "");
+  assert.equal(reopened.state.tab, 4);
+});
+
 test("hostile control sequences are shown literally, not executed", () => {
   const output = terminalText("before\x1b]52;c;CLIPBOARD\x07after\r\n\tend");
   assert.equal(output.includes("\x1b"), false);
   assert.equal(output.includes("\x07"), false);
   assert.ok(output.includes("\\x1b]52;c;CLIPBOARD\\x07"));
+});
+
+test("untrusted titles, sources and descriptions cannot inject terminal rows", () => {
+  const view: Snapshot = { kind: "tools", title: "tools", description: "bad\nheader\x1b]52;evil\x07", sections: [
+    { id: "call", title: "tool\nname", status: "reference", source: "bad\nsource", text: "safe\ncontent", raw: {} },
+  ] };
+  const inspector = new Inspector([view], theme, kb, () => 30, () => {}, () => {});
+  const lines = inspector.render(130);
+  assert.ok(lines.every((line) => !line.includes("\n") && !line.includes("\x1b]52")));
+  assert.ok(lines.some((line) => line.includes("tool\\nname")));
+  assert.ok(lines.some((line) => line.includes("bad\\nsource")));
 });
 
 test("diff review can save or cancel, with bounded lines", () => {

@@ -6,6 +6,9 @@ import {
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { createTwoFilesPatch } from "diff";
+import { contentEstimate, emptyEstimate, ESTIMATE_NOTE, formatEstimate, jsonEstimate, sumEstimates, textEstimate, usageText, type TokenEstimate } from "./metrics.ts";
+
+import { joinRich, rich, shareBar, toned, type Highlight, type Tone } from "./presentation.ts";
 
 export interface Section {
   id: string;
@@ -15,10 +18,17 @@ export interface Section {
   raw: unknown;
   status: "included" | "excluded" | "reference" | "captured";
   editableEntryId?: string;
+  estimate?: TokenEstimate;
+  /** Reference groups (Tools) can be expanded without adding model context. */
+  children?: Section[];
+  sortTokens?: number;
+  highlights?: Highlight[];
+  titleHighlights?: Highlight[];
+  indicator?: { text: string; tone: Tone };
 }
 
 export interface Snapshot {
-  kind: "preview" | "request" | "diff";
+  kind: "preview" | "request" | "diff" | "tools" | "growth";
   title: string;
   description: string;
   sections: Section[];
@@ -106,9 +116,13 @@ export function activeCompaction(entries: readonly SessionEntry[]): Extract<Sess
 export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Snapshot {
   const sections: Section[] = [];
   const options = ctx.getSystemPromptOptions();
+  const categories = new Map<string, TokenEstimate>();
+  const add = (category: string, value: TokenEstimate) => categories.set(category, sumEstimates([categories.get(category) ?? emptyEstimate(), value]));
+  const system = ctx.getSystemPrompt();
+  add("System instructions", textEstimate(system));
   sections.push({
     id: "system", title: "System instructions", source: "ctx.getSystemPrompt() — current pi prompt",
-    status: "included", text: ctx.getSystemPrompt(), raw: ctx.getSystemPrompt(),
+    status: "included", text: system, raw: system, estimate: textEstimate(system),
   });
   sections.push({
     id: "prompt-inputs", title: "System prompt sources", source: "Base construction inputs (reference, not extra messages)",
@@ -116,11 +130,13 @@ export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Sn
   });
   const active = new Set(pi.getActiveTools());
   for (const tool of pi.getAllTools().filter((t) => active.has(t.name))) {
+    const estimate = jsonEstimate({ name: tool.name, description: tool.description, parameters: tool.parameters });
+    add("Tool definitions", estimate);
     sections.push({
       id: `tool:${tool.name}`, title: `Tool · ${tool.name}`, status: "included",
       source: tool.sourceInfo.path,
       text: `${tool.description}\n\nParameters:\n${jsonText(tool.parameters)}`,
-      raw: tool,
+      raw: tool, estimate,
     });
   }
   const branch = ctx.sessionManager.getBranch();
@@ -131,6 +147,21 @@ export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Sn
     const messages = sessionEntryToContextMessages(entry);
     const llm = convertToLlm(messages);
     const role = entry.type === "message" ? entry.message.role : entry.type;
+    const estimates: TokenEstimate[] = [];
+    for (const message of llm) {
+      if (message.role === "assistant") {
+        for (const block of message.content) {
+          const estimate = contentEstimate(block);
+          estimates.push(estimate);
+          add(block.type === "toolCall" ? "Tool-call arguments + names" : block.type === "thinking" ? "Visible reasoning" : "Assistant text", estimate);
+        }
+      } else {
+        const estimate = contentEstimate(message.content);
+        estimates.push(estimate);
+        add(entry.type === "compaction" ? "Compaction summary" : entry.type === "branch_summary" ? "Branch summary"
+          : message.role === "toolResult" ? "Tool results" : entry.type === "custom_message" ? "Extension messages" : "User / shell messages", estimate);
+      }
+    }
     const hidden = entry.type === "custom_message" && !entry.display;
     const title = entry.type === "compaction" ? "Compaction summary"
       : entry.type === "branch_summary" ? "Branch summary"
@@ -146,6 +177,7 @@ export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Sn
         ? llm.map((m) => `[${m.role}]\n${contentText(m.content)}`).join("\n\n")
         : `Not sent by pi's message conversion.\n\n${jsonText(entry)}`,
       raw: entry,
+      estimate: llm.length ? sumEstimates(estimates) : undefined,
       editableEntryId: entry.type === "compaction" && entry.id === currentCompaction?.id ? entry.id : undefined,
     });
   }
@@ -157,9 +189,24 @@ export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Sn
     raw: omitted,
   });
   const usage = ctx.getContextUsage();
+  const total = sumEstimates([...categories.values()]);
+  const contextLabel = usage?.tokens != null ? `Pi context: ~${usage.tokens.toLocaleString()}${usage.contextWindow ? ` / ${usage.contextWindow.toLocaleString()} (${(usage.tokens / usage.contextWindow * 100).toFixed(1)}%)` : ""}` : "Pi context: unknown";
+  const breakdown = [...categories].sort((a, b) => b[1].tokens - a[1].tokens);
+  const largest = sections.filter((s) => s.estimate).sort((a, b) => b.estimate!.tokens - a.estimate!.tokens).slice(0, 10);
+  const categoryTones: Record<string, Tone> = {
+    "System instructions": "accent", "Tool definitions": "mdCode", "User / shell messages": "success",
+    "Assistant text": "mdHeading", "Visible reasoning": "thinkingText", "Tool-call arguments + names": "mdCode",
+    "Tool results": "accent", "Compaction summary": "success", "Branch summary": "success", "Extension messages": "thinkingText",
+  };
+  const bars = joinRich(breakdown.map(([name, value]) => rich`${shareBar(value.tokens, total.tokens, categoryTones[name] ?? "accent")} ${toned(formatEstimate(value).padStart(18), "accent")}  ${total.tokens ? (value.tokens / total.tokens * 100).toFixed(1) : "0.0"}%  ${name}`));
+  sections.unshift({
+    id: "context-overview", title: "Context usage & legend", status: "reference", source: "Local measurements; not extra model context",
+    ...rich`${toned(contextLabel, "accent")}\nVisible-content estimate: ${toned(formatEstimate(total), "accent")}\n\n${toned("+", "success")} Included in reconstructed context\n${toned("·", "dim")} Reference only (not additional context)\n${toned("−", "muted")} Excluded from context\nRaw JSON includes storage metadata; display labels are not sent.\n\nBreakdown (share of estimated visible tokens):\n${bars}\n\nLargest included sections:\n${largest.map((s) => `${formatEstimate(s.estimate!)}  ${s.title} · ${s.id}`).join("\n")}\n\n${ESTIMATE_NOTE}\nImages: ${total.images}; opaque/unknown blocks: ${total.opaque}. Pi's overall estimate may use response usage and a different estimation method; these totals need not match.\nPreview is not a final request: hooks, image settings and provider conversion may change it.`,
+    raw: { contextUsage: usage, estimate: total, categories: Object.fromEntries(categories), method: ESTIMATE_NOTE },
+  });
   return {
     kind: "preview", title: "Current context preview",
-    description: `Stored branch + current instructions/tools. Not a final request; hooks and provider conversion may change it. ${usage?.tokens != null ? `Pi context estimate: ${usage.tokens.toLocaleString()} tokens.` : "Token usage unknown."}`,
+    description: `${contextLabel} · visible ${formatEstimate(total)} · preview, not final request`,
     sections,
   };
 }
@@ -173,7 +220,7 @@ export function requestSnapshot(history: RequestHistory): Snapshot {
   if (capture) {
     sections.push({
       id: "request-info", title: "Request information", source: "Capture metadata; not sent to the provider", status: "reference",
-      text: jsonText({ capturedAt: capture.capturedAt, model: capture.model, leafId: capture.leafId, usage: capture.usage ?? "No response usage observed yet" }),
+      text: `${usageText(capture.usage)}\n\n${jsonText({ capturedAt: capture.capturedAt, model: capture.model, leafId: capture.leafId })}\n\nCaptured at this extension's hook; later hooks may change it. Settings are not conversation tokens. Full provider payload repeats the sections below; do not count it twice. Provider-specific payload sections are not assigned misleading JSON token counts.`,
       raw: { ...capture, payload: undefined, json: undefined },
     });
     const payload = capture.payload;
@@ -189,7 +236,7 @@ export function requestSnapshot(history: RequestHistory): Snapshot {
         }
       }
     }
-    sections.push({ id: "payload", title: "Full provider payload", source: "Unmodified payload observed by this extension", status: "captured", text: capture.json, raw: capture.payload });
+    sections.push({ id: "payload", title: "Full provider payload", source: "Duplicate view of the sections above, not additional context", status: "reference", text: capture.json, raw: capture.payload });
   }
   return { kind: "request", title: "Last captured request", description, sections };
 }
