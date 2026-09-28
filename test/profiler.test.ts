@@ -133,9 +133,9 @@ test("tool snapshots expose ranking, groups, diagnostic drilldown and untrusted 
   assert.ok(toolSnapshot([], [], "/project").sections[0].text.includes("No recorded tool"));
 });
 
-test("production tool highlights distinguish errors, heuristics and missing results without styling result prose", () => {
+test("production tool highlights color error results, not successful result prose or arguments", () => {
   const entries = [assistant("a", [call("one")]), result("b", "one", "Tool error\nRepeated arguments", { isError: true }),
-    assistant("c", [call("two")]), result("d", "two"), assistant("e", [call("pending", "other")])];
+    assistant("c", [call("two")]), result("d", "two", "Tool error\nRepeated arguments"), assistant("e", [call("pending", "other")])];
   const snapshot = toolSnapshot(entries, entries, "/project");
   const group = snapshot.sections.find((s) => s.id === "tool-stats:read")!;
   assert.deepEqual(group.indicator, { text: "!", tone: "error" });
@@ -143,7 +143,16 @@ test("production tool highlights distinguish errors, heuristics and missing resu
   const highlights = first.highlights!.map((h) => ({ text: first.text.slice(h.start, h.end), tone: h.tone }));
   assert.equal(highlights.filter((h) => h.text === "Tool error").length, 1);
   assert.ok(highlights.some((h) => h.text === "Tool error" && h.tone === "error"));
-  assert.deepEqual(group.children![1].indicator, { text: "?", tone: "warning" });
+  assert.ok(highlights.some((h) => h.text === "Tool error\nRepeated arguments" && h.tone === "error"));
+  assert.deepEqual(first.titleHighlights, [{ start: 0, end: first.title.length, tone: "error" }]);
+  const argumentStart = first.text.indexOf("Arguments:\n") + "Arguments:\n".length;
+  const argumentEnd = first.text.indexOf("\n\nResult (error):", argumentStart);
+  assert.ok(first.highlights!.every((h) => h.end <= argumentStart || h.start >= argumentEnd));
+  const second = group.children![1];
+  const resultStart = second.text.indexOf("\n\nResult:\n") + "\n\nResult:\n".length;
+  assert.ok(second.highlights!.every((h) => h.end <= resultStart), "successful result text remains neutral even if it mentions errors");
+  assert.equal(second.titleHighlights, undefined);
+  assert.deepEqual(second.indicator, { text: "?", tone: "warning" });
   const missing = snapshot.sections.find((s) => s.id === "tool-stats:other")!;
   assert.deepEqual(missing.indicator, { text: "…", tone: "muted" });
   assert.deepEqual(missing.children![0].indicator, { text: "…", tone: "muted" });

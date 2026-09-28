@@ -32,6 +32,8 @@ export interface Snapshot {
   title: string;
   description: string;
   sections: Section[];
+  /** Latest reconstructed session entry, excluding overview/reference appendices. */
+  tailSectionId?: string;
 }
 
 export interface Capture {
@@ -169,13 +171,17 @@ export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Sn
       : entry.type === "custom" ? `UI/state · ${entry.customType}`
       : role === "toolResult" && entry.type === "message" ? `Result · ${entry.message.role === "toolResult" ? entry.message.toolName : "tool"}`
       : role;
+    const isToolError = entry.type === "message" && entry.message.role === "toolResult" && entry.message.isError === true;
     sections.push({
       id: entry.id, title, source: `Session entry ${entry.id}`,
+      titleHighlights: isToolError ? toned(title, "error").highlights : undefined,
+      indicator: isToolError ? { text: "!", tone: "error" } : undefined,
       status: llm.length > 0 ? "included" : "excluded",
       // Show the actual compaction wrapper and its user role, not just summary text.
-      text: llm.length > 0
-        ? llm.map((m) => `[${m.role}]\n${contentText(m.content)}`).join("\n\n")
-        : `Not sent by pi's message conversion.\n\n${jsonText(entry)}`,
+      ...(llm.length > 0
+        ? joinRich(llm.map((m) => rich`[${m.role}]\n${m.role === "toolResult" && m.isError === true
+          ? toned(contentText(m.content), "error") : contentText(m.content)}`), "\n\n")
+        : rich`Not sent by pi's message conversion.\n\n${jsonText(entry)}`),
       raw: entry,
       estimate: llm.length ? sumEstimates(estimates) : undefined,
       editableEntryId: entry.type === "compaction" && entry.id === currentCompaction?.id ? entry.id : undefined,
@@ -207,7 +213,7 @@ export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Sn
   return {
     kind: "preview", title: "Current context preview",
     description: `${contextLabel} · visible ${formatEstimate(total)} · preview, not final request`,
-    sections,
+    sections, tailSectionId: contextEntries.at(-1)?.id,
   };
 }
 

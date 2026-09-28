@@ -36,6 +36,9 @@ class Provider(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
+        # Leave a real request in flight while /context is opened and follows it.
+        if len(REQUESTS) == 2:
+            time.sleep(3)
         for event in [
             {"id": "fixture-response", "object": "chat.completion.chunk", "model": "fixture", "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}]},
             {"id": "fixture-response", "object": "chat.completion.chunk", "model": "fixture", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110, "prompt_tokens_details": {"cached_tokens": 40}}},
@@ -155,12 +158,31 @@ def main():
         send("\x1b")
         settle()
 
+        # Failed tool results are visible in Preview without extra model calls.
+        mark = command_line("/context")
+        wait_for("Context inspector", mark)
+        send("/Could not find edits[1]"); send("\r")
+        wait_for("Result · edit", mark)
+        wait_for("Could not find edits[1]", mark)
+        send("l")
+        send("\x1b"); settle()
+
         # Capture two actual requests against only the loopback fake provider.
         mark = command_line("First local test prompt")
         wait_for("LOCAL FIXTURE RESPONSE 1", mark)
         settle()
-        mark = command_line("Second local test prompt")
+        command_line("Second local test prompt")
+        mark = command_line("/context")
+        wait_for("Context inspector", mark)
+        mark = send("F")
+        wait_for("FOLLOW", mark)
         wait_for("LOCAL FIXTURE RESPONSE 2", mark)
+        # Copy no data and invoke no model: navigate the live overlay in place.
+        mark = send("h")
+        send("g"); send("g")
+        wait_for("Context usage & legend", mark)
+        send("G"); send("l"); send("\x15"); send("\x04")
+        send("\x1b")
         settle()
         mark = command_line("/context request")
         wait_for("Full provider payload", mark)
@@ -217,6 +239,10 @@ def main():
         assert "\x1b" not in overview["text"], "Rendering must not embed ANSI in exports"
         tool_group = next(s for s in export["tools"]["sections"] if s["id"] == "tool-stats:read")
         assert tool_group["indicator"] == {"text": "?", "tone": "warning"}
+        failed_result = next(s for s in export["preview"]["sections"] if s["id"] == "tool-result-error")
+        assert failed_result["indicator"] == {"text": "!", "tone": "error"}
+        assert any(h["tone"] == "error" and "Could not find edits[1]" in failed_result["text"][h["start"]:h["end"]] for h in failed_result["highlights"])
+        assert "\x1b" not in failed_result["text"], "Exported error text stays plain"
         assert export["requests"][-1]["usage"]["cacheRead"] == 40
         assert any(s["id"] == "system" for s in export["preview"]["sections"])
         assert len(REQUESTS) == 2, "Inspection/export must not invoke the model"
@@ -279,7 +305,7 @@ def main():
         assert summary_requests, "Expected a real pi compaction request"
         assert "correct database" in json.dumps(summary_requests[-1])
         assert "WRONG database" not in json.dumps(summary_requests[-1])
-        print("PASS: real TUI estimates, tool stats/drilldown/resize, growth, request capture/diff/export, cancellation, edit/reopen, undo, subsequent model context and compaction.")
+        print("PASS: real TUI live follow during a request, vim navigation, estimates, tool stats/drilldown/resize, growth, capture/diff/export, cancellation, edit/reopen, undo, subsequent model context and compaction.")
         print("Auth isolation: temporary HOME + PI_CODING_AGENT_DIR, empty auth, env allowlist, offline startup, loopback fake provider only.")
         os.write(fd, b"/quit\r")
     except Exception:

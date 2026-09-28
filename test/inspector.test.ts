@@ -60,9 +60,10 @@ test("content scrolling, raw toggle, copy, tab switching, and close", () => {
   inspector.handleInput("y");
   assert.equal(action?.kind, "copy");
   assert.equal(action?.state.raw, true);
-  inspector.handleInput("2");
-  assert.equal(inspector.state.tab, 1);
-  inspector.handleInput("\x1b");
+  const reopened = new Inspector([snapshot, snapshot, snapshot], theme, kb, () => 30, () => {}, (value) => { action = value; });
+  reopened.handleInput("2");
+  assert.equal(reopened.state.tab, 1);
+  reopened.handleInput("\x1b");
   assert.equal(action?.kind, "close");
 });
 
@@ -123,6 +124,118 @@ test("untrusted titles, sources and descriptions cannot inject terminal rows", (
   assert.ok(lines.every((line) => !line.includes("\n") && !line.includes("\x1b]52")));
   assert.ok(lines.some((line) => line.includes("tool\\nname")));
   assert.ok(lines.some((line) => line.includes("bad\\nsource")));
+});
+
+const plain = (lines: string[]) => lines.join("\n").replace(/\x1b\[[\d;]*m/g, "");
+const numbered: Snapshot = { kind: "preview", title: "entries", description: "test", tailSectionId: "entry-39", sections: [
+  ...Array.from({ length: 40 }, (_, i) => ({ id: `entry-${i}`, title: `Entry ${i}`, source: "session", status: "included" as const,
+    text: Array.from({ length: 80 }, (_, n) => `entry ${i} line ${n + 1}`).join("\n"), raw: { index: i } })),
+  { id: "omitted", title: "Summarized away", source: "history", status: "excluded", text: "not the tail", raw: {} },
+] };
+
+test("vim ends, half-pages and pane focus; gg prefix resets on intervening keys", () => {
+  const inspector = new Inspector([numbered], theme, kb, () => 30, () => {}, () => {});
+  inspector.render(130); // body = 19 rows
+  inspector.handleInput("G"); assert.equal(inspector.state.sectionId, "omitted");
+  inspector.handleInput("g"); assert.equal(inspector.state.sectionId, "omitted");
+  inspector.handleInput("g"); assert.equal(inspector.state.sectionId, "entry-0");
+  inspector.handleInput("\x04"); assert.equal(inspector.state.sectionId, "entry-9");
+  inspector.handleInput("\x15"); assert.equal(inspector.state.sectionId, "entry-0");
+  inspector.handleInput("g"); inspector.handleInput("j"); inspector.handleInput("g");
+  assert.equal(inspector.state.sectionId, "entry-1");
+  inspector.handleInput("l"); inspector.render(130);
+  inspector.handleInput("G");
+  assert.ok(plain(inspector.render(130)).includes("lines 62–80/80"));
+  inspector.handleInput("gg");
+  assert.ok(plain(inspector.render(130)).includes("lines 1–19/80"));
+  inspector.handleInput("\x04");
+  assert.ok(plain(inspector.render(130)).includes("lines 10–28/80"));
+  inspector.handleInput("\x15");
+  assert.ok(plain(inspector.render(130)).includes("lines 1–19/80"));
+  inspector.handleInput("h"); inspector.handleInput("j");
+  assert.equal(inspector.state.sectionId, "entry-2");
+  inspector.handleInput("/");
+  for (const char of "ggGFhl") inspector.handleInput(char);
+  assert.equal(inspector.state.query, "ggGFhl", "navigation keys are literal in search");
+});
+
+test("live updates preserve selection, scroll, raw view and search; invalidate same-ID content", () => {
+  const inspector = new Inspector([numbered], theme, kb, () => 30, () => {}, () => {});
+  inspector.render(130);
+  inspector.handleInput("l"); inspector.handleInput("\x04");
+  const updated = { ...numbered, sections: numbered.sections.map((s) => ({ ...s, text: s.text.replaceAll("entry 0", "UPDATED") })) };
+  inspector.updateSnapshots([updated]);
+  const output = plain(inspector.render(130));
+  assert.equal(inspector.state.sectionId, "entry-0");
+  assert.ok(output.includes("UPDATED line 10"));
+  assert.ok(output.includes("lines 10–28/80"));
+  inspector.handleInput("r");
+  inspector.updateSnapshots([{ ...updated, sections: updated.sections.map((s) => ({ ...s, raw: { fresh: true } })) }]);
+  assert.ok(plain(inspector.render(130)).includes('"fresh": true'));
+  inspector.handleInput("/");
+  for (const char of "Entry 3") inspector.handleInput(char);
+  inspector.render(130);
+  inspector.updateSnapshots([updated]);
+  inspector.handleInput("9"); // still searching after refresh
+  inspector.render(130);
+  assert.equal(inspector.state.query, "Entry 39");
+  assert.equal(inspector.state.sectionId, "entry-39");
+  inspector.handleInput("\r");
+  inspector.updateSnapshots([{ ...updated, sections: [] }]);
+  assert.ok(plain(inspector.render(130)).includes("No matching sections"));
+  assert.equal(inspector.state.sectionId, undefined);
+});
+
+test("F follows latest Preview entry, not appendices; navigation pauses without stopping updates", () => {
+  const inspector = new Inspector([numbered, snapshot], theme, kb, () => 30, () => {}, () => {}, { tab: 1, query: "none", sorted: true });
+  inspector.render(130);
+  inspector.handleInput("F");
+  assert.ok(plain(inspector.render(130)).includes("FOLLOW"));
+  assert.equal(inspector.state.tab, 0);
+  assert.equal(inspector.state.query, "");
+  assert.equal(inspector.state.sorted, false);
+  assert.equal(inspector.state.sectionId, "entry-39");
+  const next = { ...numbered, tailSectionId: "new", sections: [...numbered.sections.slice(0, -1),
+    { ...numbered.sections[0], id: "new", text: "NEW ENTRY", raw: {} }, numbered.sections.at(-1)!] };
+  inspector.updateSnapshots([next, snapshot]);
+  for (const width of [130, 70, 10, 1]) {
+    const lines = inspector.render(width);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    assert.equal(inspector.state.sectionId, "new");
+  }
+  inspector.handleInput("k");
+  assert.equal(inspector.state.following, false);
+  inspector.updateSnapshots([numbered, snapshot]);
+  inspector.render(130);
+  assert.equal(inspector.state.sectionId, "entry-0", "removed selection falls back safely");
+  inspector.handleInput("F"); inspector.render(130);
+  inspector.handleInput("F");
+  assert.equal(inspector.state.following, false);
+  inspector.handleInput("F"); inspector.render(130);
+  inspector.handleInput("2");
+  assert.equal(inspector.state.following, false);
+});
+
+test("live timer and manual refresh stop on close, action or host disposal", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  for (const exit of ["q", "y", "x", "e", "u", "dispose"]) {
+    let revision = 0;
+    let reads = 0;
+    const inspector = new Inspector([snapshot], theme, kb, () => 30, () => {}, () => {}, { sectionId: "compact" }, {
+      revision: () => String(revision), read: () => { reads++; return [snapshot]; }, onError: (e) => { throw e; },
+    });
+    inspector.render(130);
+    inspector.handleInput("f");
+    assert.equal(reads, 1);
+    revision++;
+    t.mock.timers.tick(250);
+    assert.equal(reads, 2);
+    if (exit === "dispose") inspector.dispose(); else inspector.handleInput(exit);
+    revision++;
+    t.mock.timers.tick(1000);
+    inspector.handleInput("f");
+    assert.equal(reads, 2, exit);
+  }
 });
 
 test("diff review can save or cancel, with bounded lines", () => {

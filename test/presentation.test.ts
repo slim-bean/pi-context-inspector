@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import type { KeybindingsManager, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import { Inspector, type InspectorAction } from "../src/inspector.ts";
 import { deltaTone, joinRich, paint, rich, shareBar, tokenTone, toned } from "../src/presentation.ts";
 import type { Snapshot } from "../src/snapshots.ts";
+import { toolSnapshot } from "../src/profiler.ts";
+import { EDIT_ERROR, fixtureEntries } from "./fixtures.ts";
 
 const colors: Record<string, number> = { accent: 36, warning: 33, error: 31, success: 32, dim: 90, muted: 37, border: 34 };
 const theme = {
@@ -59,7 +61,7 @@ test("selected rows retain semantic colors; colored content wraps and invalidate
     { id: "excluded", title: "excluded", source: "reference", status: "excluded", text: "excluded", raw: {} },
   ] };
   let action: InspectorAction | undefined;
-  const inspector = new Inspector([snapshot], changingTheme, kb, () => 38, () => {}, (value) => { action = value; });
+  let inspector = new Inspector([snapshot], changingTheme, kb, () => 38, () => {}, (value) => { action = value; });
   const first = inspector.render(140).join("\n");
   assert.ok(first.includes("\x1b[31m!\x1b[39m"));
   assert.ok(first.includes("\x1b[33m~500 tok + ?\x1b[39m"));
@@ -71,6 +73,7 @@ test("selected rows retain semantic colors; colored content wraps and invalidate
   inspector.handleInput("y");
   assert.equal(action?.section?.text, body.text);
   assert.equal(action?.section?.text.includes("\x1b"), false);
+  inspector = new Inspector([snapshot], changingTheme, kb, () => 38, () => {}, () => {}, action!.state);
   palette = 60;
   inspector.invalidate();
   const updated = inspector.render(140).join("\n");
@@ -89,6 +92,36 @@ test("selected rows retain semantic colors; colored content wraps and invalidate
   for (const char of "small") inspector.handleInput(char);
   inspector.handleInput("\r");
   assert.ok(inspector.render(140).join("\n").includes("\x1b[96m~10 tok\x1b[39m"), "filtering must not promote a small badge to warning color");
+});
+
+test("failed edit result renders red, wraps safely, and stays plain in raw/copy data", () => {
+  const entries = fixtureEntries("/project", true).slice(1) as SessionEntry[];
+  const view = toolSnapshot(entries, entries, "/project");
+  const group = view.sections.find((s) => s.id === "tool-stats:edit")!;
+  const section = group.children![0];
+  const painted = paint(section.text, section.highlights!, theme);
+  assert.ok(painted.includes(`\x1b[31m${EDIT_ERROR}\x1b[39m`));
+  assert.equal(strip(painted), section.text);
+  const inspector = new Inspector([view], theme, kb, () => 50, () => {}, () => {}, { drillId: group.id });
+  assert.ok(inspector.render(180).join("\n").includes(`\x1b[31m${section.title}\x1b[39m`));
+  inspector.handleInput("l");
+  for (const width of [180, 100, 70, 30, 10, 1]) {
+    assert.ok(inspector.render(width).every((line) => visibleWidth(line) <= width));
+  }
+  inspector.handleInput("r"); inspector.render(180);
+  inspector.handleInput("G");
+  const raw = inspector.render(180).join("\n");
+  assert.ok(strip(raw).includes('"isError": true'));
+  assert.ok(!raw.includes("\x1b[31mCould not find"), "raw content has no error styling");
+  let action: InspectorAction | undefined;
+  const copy = new Inspector([view], theme, kb, () => 50, () => {}, (value) => { action = value; }, { drillId: group.id });
+  copy.render(180); copy.handleInput("y");
+  assert.ok(action?.section?.text.includes(EDIT_ERROR));
+  assert.equal(action?.section?.text.includes("\x1b"), false);
+  const hostile = toned("failure\n日本語\x1b]52;c;bad\x07", "error");
+  const safe = paint(hostile.text, hostile.highlights, theme);
+  assert.ok(safe.includes("\x1b[31m日本語\\x1b]52;c;bad\\x07\x1b[39m"));
+  assert.equal(safe.includes("\x1b]52"), false);
 });
 
 test("growth colors survive selection and filtering while text remains searchable", () => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { buildPreview, CAPTURE_LIMIT, contentText, diffSnapshot, makeDiff, RequestHistory, requestSnapshot } from "../src/snapshots.ts";
-import { fixture } from "./fixtures.ts";
+import { EDIT_ERROR, fixture } from "./fixtures.ts";
 
 const metadata = { capturedAt: "2026-01-01", sessionId: "session", leafId: "leaf", model: "test/model" };
 test("preview includes hidden messages and wrapped summary, distinguishes UI-only and omitted history", (t) => {
@@ -35,6 +35,10 @@ test("preview includes hidden messages and wrapped summary, distinguishes UI-onl
   assert.ok(snapshot.sections.find((s) => s.id === "omitted")?.text.includes("old-user"));
   assert.ok(snapshot.description.startsWith("Pi context: ~100 / 1,000 (10.0%)"));
   assert.equal(snapshot.sections[0].id, "context-overview");
+  assert.equal(snapshot.sections.at(-1)?.id, "omitted");
+  assert.equal(snapshot.tailSectionId, ctx.sessionManager.buildContextEntries().at(-1)?.id);
+  assert.ok(snapshot.sections.some((s) => s.id === snapshot.tailSectionId));
+  assert.notEqual(snapshot.tailSectionId, "omitted");
   assert.ok(snapshot.sections[0].text.includes("Reference only (not additional context)"));
   assert.equal(snapshot.sections.find((s) => s.id === "prompt-inputs")?.estimate, undefined);
   assert.equal(snapshot.sections.find((s) => s.id === "omitted")?.estimate, undefined);
@@ -44,6 +48,31 @@ test("preview includes hidden messages and wrapped summary, distinguishes UI-onl
   assert.equal(raw.categories["System instructions"].tokens, 4);
   assert.ok(raw.categories["Tool definitions"].tokens > 0);
   assert.ok(raw.categories["Compaction summary"].tokens > 0);
+});
+
+test("Preview colors failed tool results from metadata, never from their wording", (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const manager = SessionManager.open(f.path);
+  const ctx = {
+    sessionManager: manager, getSystemPrompt: () => "", getSystemPromptOptions: () => ({}), getContextUsage: () => undefined,
+  } as unknown as ExtensionCommandContext;
+  const pi = { getActiveTools: () => [], getAllTools: () => [] } as unknown as ExtensionAPI;
+  const before = buildPreview(ctx, pi);
+  const ids = [true, false].map((isError) => manager.appendMessage({ role: "toolResult", toolName: "edit", toolCallId: `edit-${isError}`,
+    content: [{ type: "text", text: EDIT_ERROR }], timestamp: 1, isError }));
+  const preview = buildPreview(ctx, pi);
+  const [failed, successful] = ids.map((id) => preview.sections.find((s) => s.id === id)!);
+  assert.equal(failed.text, `[toolResult]\n${EDIT_ERROR}`);
+  assert.deepEqual(failed.indicator, { text: "!", tone: "error" });
+  assert.deepEqual(failed.titleHighlights, [{ start: 0, end: failed.title.length, tone: "error" }]);
+  assert.deepEqual(failed.highlights, [{ start: "[toolResult]\n".length, end: failed.text.length, tone: "error" }]);
+  assert.equal(successful.text, failed.text);
+  assert.deepEqual(successful.highlights, []);
+  assert.equal(successful.titleHighlights, undefined);
+  assert.equal(successful.indicator, undefined);
+  assert.deepEqual(failed.estimate, successful.estimate, "styling must not add model-visible content or token costs");
+  assert.equal(preview.sections.length, before.sections.length + 2);
+  assert.equal(JSON.stringify(preview).includes("\\u001b"), false);
 });
 
 test("captures snapshot payloads without mutation; only last two are retained", () => {

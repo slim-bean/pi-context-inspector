@@ -2,6 +2,7 @@ import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent"
 import { Input, SelectList, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from "@earendil-works/pi-tui";
 import { jsonText, type Section, type Snapshot } from "./snapshots.ts";
 import { formatEstimate } from "./metrics.ts";
+import { LiveRefresh, type LiveSource } from "./live.ts";
 import { paint, terminalLine, tokenTone } from "./presentation.ts";
 export { terminalText } from "./presentation.ts";
 
@@ -12,6 +13,7 @@ export interface ViewState {
   raw: boolean;
   sorted: boolean;
   drillId?: string;
+  following: boolean;
 }
 export type InspectorAction = {
   kind: "close" | "refresh" | "copy" | "export" | "edit" | "undo";
@@ -34,6 +36,9 @@ export class Inspector implements Component, Focusable {
   private wrapped: string[] = [];
   private note = "";
   private largestEstimate = 0;
+  private pendingG = false;
+  private live?: LiveRefresh<Snapshot[]>;
+  private disposed = false;
   readonly state: ViewState;
 
   constructor(
@@ -44,9 +49,41 @@ export class Inspector implements Component, Focusable {
     private requestRender: () => void,
     private done: (action: InspectorAction) => void,
     initial?: Partial<ViewState>,
+    source?: LiveSource<Snapshot[]>,
   ) {
-    this.state = { tab: 0, query: "", raw: false, sorted: false, ...initial };
+    this.state = { tab: 0, query: "", raw: false, sorted: false, following: false, ...initial };
     this.search.setValue(this.state.query);
+    if (source) this.live = new LiveRefresh(source, (snapshots) => this.updateSnapshots(snapshots));
+  }
+
+  /** Replace data in place; browsing/search/focus survive updates. */
+  updateSnapshots(snapshots: Snapshot[]): void {
+    if (this.disposed) return;
+    const selectedId = this.state.sectionId;
+    this.snapshots = snapshots;
+    this.invalidate();
+    this.ensureList();
+    if (this.state.sectionId !== selectedId) this.scroll = 0;
+    this.requestRender();
+  }
+
+  close(): void { this.finish("close"); }
+
+  dispose(): void {
+    this.disposed = true;
+    this.live?.dispose();
+  }
+
+  private follow(): void {
+    this.state.following = !this.state.following;
+    if (!this.state.following) return;
+    this.state.tab = 0;
+    this.state.query = "";
+    this.state.sorted = false;
+    this.state.drillId = undefined;
+    this.search.setValue("");
+    this.focus = "content";
+    this.invalidate();
   }
 
   get focused(): boolean { return this._focused; }
@@ -91,6 +128,7 @@ export class Inspector implements Component, Focusable {
   }
 
   private move(amount: number): void {
+    this.state.following = false;
     if (this.focus === "content") this.scroll = Math.max(0, Math.min(Math.max(0, this.wrapped.length - this.bodyHeight), this.scroll + amount));
     else {
       this.index = Math.max(0, Math.min(this.filtered.length - 1, this.index + amount));
@@ -101,11 +139,16 @@ export class Inspector implements Component, Focusable {
   }
 
   private finish(kind: InspectorAction["kind"]): void {
+    if (this.disposed) return;
+    this.dispose();
     this.done({ kind, section: this.selected, state: { ...this.state } });
   }
 
   handleInput(data: string): void {
+    if (this.disposed) return;
     this.ensureList();
+    const wasG = this.pendingG;
+    this.pendingG = false;
     if (this.searching) {
       if (this.kb.matches(data, "tui.select.cancel") || this.kb.matches(data, "tui.select.confirm")) {
         this.searching = false;
@@ -119,6 +162,7 @@ export class Inspector implements Component, Focusable {
     } else if (this.kb.matches(data, "tui.select.cancel") || data === "q") {
       this.finish("close"); return;
     } else if (["1", "2", "3", "4", "5"].includes(data) && Number(data) <= this.snapshots.length) {
+      this.state.following = false;
       this.state.tab = Number(data) - 1;
       this.state.sectionId = undefined;
       this.state.drillId = undefined;
@@ -126,9 +170,11 @@ export class Inspector implements Component, Focusable {
       this.search.setValue("");
       this.scroll = 0;
     } else if (data === "/") {
+      this.state.following = false;
       this.searching = true;
       this.search.focused = this.focused;
     } else if (matchesKey(data, "backspace") && this.state.drillId) {
+      this.state.following = false;
       this.state.sectionId = this.state.drillId;
       this.state.drillId = undefined;
       this.state.query = "";
@@ -136,6 +182,7 @@ export class Inspector implements Component, Focusable {
       this.focus = "list";
       this.scroll = 0;
     } else if (this.kb.matches(data, "tui.select.confirm") && this.selected?.children?.length) {
+      this.state.following = false;
       this.state.drillId = this.selected.id;
       this.state.sectionId = undefined;
       this.state.query = "";
@@ -148,11 +195,20 @@ export class Inspector implements Component, Focusable {
     else if (this.kb.matches(data, "tui.select.down") || data === "j") this.move(1);
     else if (this.kb.matches(data, "tui.select.pageUp")) this.move(-this.bodyHeight);
     else if (this.kb.matches(data, "tui.select.pageDown")) this.move(this.bodyHeight);
-    else if (matchesKey(data, "home")) this.move(-Number.MAX_SAFE_INTEGER);
-    else if (matchesKey(data, "end")) this.move(Number.MAX_SAFE_INTEGER);
-    else if (data === "s") { this.state.sorted = !this.state.sorted; this.state.sectionId = undefined; this.scroll = 0; }
+    else if (matchesKey(data, "home") || (matchesKey(data, "g") && wasG) || data === "gg") this.move(-Number.MAX_SAFE_INTEGER);
+    else if (matchesKey(data, "end") || matchesKey(data, "shift+g")) this.move(Number.MAX_SAFE_INTEGER);
+    else if (matchesKey(data, "g")) this.pendingG = true;
+    else if (matchesKey(data, "ctrl+u")) this.move(-Math.max(1, Math.floor(this.bodyHeight / 2)));
+    else if (matchesKey(data, "ctrl+d")) this.move(Math.max(1, Math.floor(this.bodyHeight / 2)));
+    else if (matchesKey(data, "h")) this.focus = "list";
+    else if (matchesKey(data, "l")) this.focus = "content";
+    else if (matchesKey(data, "shift+f")) this.follow();
+    else if (data === "s") { this.state.following = false; this.state.sorted = !this.state.sorted; this.state.sectionId = undefined; this.scroll = 0; }
     else if (data === "r") { this.state.raw = !this.state.raw; this.scroll = 0; }
-    else if (data === "f") { this.finish("refresh"); return; }
+    else if (data === "f") {
+      if (this.live) this.live.refresh(true);
+      else { this.finish("refresh"); return; }
+    }
     else if (data === "y") { this.finish("copy"); return; }
     else if (data === "x") { this.finish("export"); return; }
     else if (data === "u") { this.finish("undo"); return; }
@@ -169,6 +225,10 @@ export class Inspector implements Component, Focusable {
     const height = Math.max(1, Math.min(42, this.terminalRows() - 2));
     const inner = Math.max(1, width - 2);
     this.bodyHeight = Math.max(1, height - 9);
+    if (this.state.following && this.snapshot.tailSectionId !== this.state.sectionId) {
+      this.state.sectionId = this.snapshot.tailSectionId;
+      this.list = undefined;
+    }
     this.ensureList();
     const split = inner >= 90;
     const leftWidth = split ? Math.min(44, Math.floor(inner * 0.36)) : inner;
@@ -181,7 +241,8 @@ export class Inspector implements Component, Focusable {
       this.wrapped = paint(text, this.state.raw ? [] : section?.highlights ?? [], this.theme).split("\n").flatMap((line) => wrapTextWithAnsi(line, contentWidth));
       this.wrappedKey = key;
     }
-    this.scroll = Math.min(this.scroll, Math.max(0, this.wrapped.length - this.bodyHeight));
+    const bottom = Math.max(0, this.wrapped.length - this.bodyHeight);
+    this.scroll = this.state.following ? bottom : Math.min(this.scroll, bottom);
     const th = this.theme;
     const pad = (text: string, w: number) => {
       const clipped = truncateToWidth(text, w);
@@ -194,7 +255,7 @@ export class Inspector implements Component, Focusable {
       : `${th.bold(th.fg("accent", labels[this.state.tab] ?? labels[0]))} · 1–${labels.length} tabs`;
     const lines = [
       th.fg("border", `╭${"─".repeat(Math.max(0, width - 2))}╮`),
-      row(` ${th.bold("Context inspector")}   ${tabs}`),
+      row(` ${th.bold("Context inspector")} · ${this.state.following ? "FOLLOW" : "LIVE"}   ${tabs}`),
       row(` ${th.fg("muted", terminalLine(this.snapshot.description))}`),
       row(this.searching ? this.search.render(inner)[0] : ` / Search: ${terminalLine(this.state.query || "(all)")} · ${this.filtered.length} sections · ${this.state.sorted ? "size ↓" : "default order"} · ${this.focus} · ${this.state.raw ? "raw" : "text"}${this.state.drillId ? " · Backspace: up" : ""}`),
       row(th.fg("dim", "─".repeat(inner))),
@@ -211,8 +272,8 @@ export class Inspector implements Component, Focusable {
     }
     lines.push(
       row(this.note ? th.fg("muted", terminalLine(this.note)) : `${section ? this.statusMarker(section) : ""} ${section?.status ?? ""}${section?.estimate ? " " + th.fg(tokenTone(section.estimate.tokens, this.largestEstimate), formatEstimate(section.estimate)) : ""}${th.fg("muted", terminalLine(` · ${section?.source ?? ""} · lines ${Math.min(this.scroll + 1, this.wrapped.length)}–${Math.min(this.scroll + this.bodyHeight, this.wrapped.length)}/${this.wrapped.length}`))}`),
-      row(th.fg("dim", "↑↓/j k · Tab read/list · Enter drill · Backspace up · / search · s size · r raw · f refresh")),
-      row(th.fg("dim", "y copy · x export · e edit summary · u undo · Esc close")),
+      row(th.fg("dim", "j k · gg/G ends · ^u/^d half-page · h/l panes · Tab · Enter drill · Backspace up · / search")),
+      row(th.fg("dim", "F follow · f refresh · s size · r raw · y copy · x export · e edit · u undo · Esc/q close")),
       th.fg("border", `╰${"─".repeat(Math.max(0, width - 2))}╯`),
     );
     return lines.slice(0, height).map((line) => truncateToWidth(line, width));

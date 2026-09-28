@@ -15,19 +15,28 @@ const OVERLAY = { overlay: true, overlayOptions: { width: "96%" as const, maxHei
 export default function contextInspector(pi: ExtensionAPI): void {
   const history = new RequestHistory();
   let commandOpen = false;
-  pi.on("session_start", () => { history.clear(); });
-  pi.on("session_shutdown", () => { history.clear(); });
+  let captureRevision = 0;
+  let closeInspector: (() => void) | undefined;
+  pi.on("session_start", () => { history.clear(); captureRevision++; });
+  pi.on("session_shutdown", () => {
+    // Stop reading the command context before the runtime invalidates it.
+    closeInspector?.();
+    history.clear();
+    captureRevision++;
+  });
   pi.on("before_provider_request", (event, ctx) => {
     history.record(event.payload, {
       capturedAt: new Date().toISOString(), sessionId: ctx.sessionManager.getSessionId(),
       leafId: ctx.sessionManager.getLeafId(), model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unknown",
     });
+    captureRevision++;
     // Observation only: never return a replacement payload.
   });
   pi.on("message_end", (event) => {
     if (event.message.role === "assistant" && history.latest) {
       const { input, output, cacheRead, cacheWrite } = event.message.usage;
       history.latest.usage = { input, output, cacheRead, cacheWrite };
+      captureRevision++;
     }
   });
 
@@ -99,7 +108,7 @@ export default function contextInspector(pi: ExtensionAPI): void {
         const [command] = input.split(/\s+/);
         const rest = input.slice(command.length).trim();
         if (command === "help") {
-          ctx.ui.notify("/context [request|diff|stats|growth|edit [entry-id]|undo|export [path]]\nOverlay: 1–5 tabs, Tab list/content, Enter drill, Backspace up, s size sort, / search, r raw, y copy, x export, e edit, u undo. ~tokens are local estimates, not billing. Tool diagnostics are heuristics. Captures are memory-only. Edits save backups and reopen the session.", "info");
+          ctx.ui.notify("/context [request|diff|stats|growth|edit [entry-id]|undo|export [path]]\nOverlay: auto-refreshes saved entries; F follows newest Preview entry (navigation pauses follow). 1–5 tabs, gg/G beginning/end, Ctrl+u/d half-page, h/l list/content, Tab switch, Enter drill, Backspace up, s size sort, / search, r raw, f refresh, y copy, x export, e edit, u undo. ~tokens are local estimates, not billing. Tool diagnostics are heuristics. Captures are memory-only. Edits save backups and reopen the session.", "info");
           return;
         }
         if (command === "edit") { await editSummary(ctx, rest || undefined); return; }
@@ -107,12 +116,28 @@ export default function contextInspector(pi: ExtensionAPI): void {
         if (command === "export") { await exportContext(ctx, rest || undefined); return; }
         if (command && !["request", "diff", "stats", "growth"].includes(command)) throw new Error("Unknown /context command. Try /context help.");
         let state: Partial<ViewState> = { tab: command === "request" ? 1 : command === "diff" ? 2 : command === "stats" ? 3 : command === "growth" ? 4 : 0 };
-        for (;;) {
+        const readSnapshots = () => {
           const branch = ctx.sessionManager.getBranch();
-          const snapshots = [buildPreview(ctx, pi), requestSnapshot(history), diffSnapshot(history),
+          return [buildPreview(ctx, pi), requestSnapshot(history), diffSnapshot(history),
             toolSnapshot(branch, ctx.sessionManager.buildContextEntries(), ctx.cwd), growthSnapshot(branch)];
-          const action = await ctx.ui.custom<InspectorAction>((tui, theme, kb, done) =>
-            new Inspector(snapshots, theme, kb, () => tui.terminal.rows, () => tui.requestRender(), done, state), OVERLAY);
+        };
+        for (;;) {
+          let inspector: Inspector | undefined;
+          let action: InspectorAction;
+          try {
+            action = await ctx.ui.custom<InspectorAction>((tui, theme, kb, done) => {
+              inspector = new Inspector(readSnapshots(), theme, kb, () => tui.terminal.rows, () => tui.requestRender(), done, state, {
+                revision: () => `${ctx.sessionManager.getLeafId()}:${captureRevision}`,
+                read: readSnapshots,
+                onError: (error) => { inspector?.close(); notify(errorText(error), "error"); },
+              });
+              closeInspector = () => inspector?.close();
+              return inspector;
+            }, OVERLAY);
+          } finally {
+            inspector?.dispose();
+            closeInspector = undefined;
+          }
           if (!action || action.kind === "close") return;
           state = action.state;
           if (action.kind === "edit") { await editSummary(ctx, action.section?.editableEntryId); return; }
