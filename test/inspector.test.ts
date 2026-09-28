@@ -216,6 +216,19 @@ test("F follows latest Preview entry, not appendices; navigation pauses without 
   assert.equal(inspector.state.following, false);
 });
 
+test("section title stays pinned in the content pane while scrolling in narrow and wide layouts", () => {
+  const view: Snapshot = { ...numbered, sections: [{ ...numbered.sections[0], title: "Result · read" }] };
+  const inspector = new Inspector([view], theme, kb, () => 30, () => {}, () => {});
+  inspector.handleInput("l");
+  for (const width of [130, 70]) {
+    inspector.render(width); inspector.handleInput("G");
+    const lines = inspector.render(width);
+    assert.ok(plain([lines[4]]).includes("Result · read"));
+    assert.ok(plain(lines).includes("entry 0 line 80"));
+    assert.ok(lines.every((line) => visibleWidth(line) <= width));
+  }
+});
+
 test("live timer and manual refresh stop on close, action or host disposal", (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   for (const exit of ["q", "y", "x", "e", "u", "dispose"]) {

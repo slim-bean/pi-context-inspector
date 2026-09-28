@@ -1,24 +1,15 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { convertToLlm, sessionEntryToContextMessages, type SessionEntry } from "@earendil-works/pi-coding-agent";
-import { contentText, jsonText, type Section, type Snapshot } from "./snapshots.ts";
+import type { Section, Snapshot } from "./snapshots.ts";
+import { contentText, toolCallView, toolResultView } from "./content.ts";
+import { pairToolCalls, type ToolPair, type ToolResult as Result } from "./tool-pairs.ts";
 import { contentEstimate, emptyEstimate, ESTIMATE_NOTE, formatEstimate, hasUsage, inputTokens, object, sumEstimates, usageText, type TokenEstimate } from "./metrics.ts";
 
 import { deltaTone, joinRich, rich, toned, type StyledText, type Tone } from "./presentation.ts";
 
-type MessageEntry = Extract<SessionEntry, { type: "message" }>;
-type Assistant = Extract<MessageEntry["message"], { role: "assistant" }>;
-type ToolCall = Extract<Assistant["content"][number], { type: "toolCall" }>;
-type Result = Extract<MessageEntry["message"], { role: "toolResult" }>;
 interface Signal { kind: string; related?: string }
-export interface ProfileCall {
-  id: string;
-  tool: string;
-  callId: string;
-  entryId?: string;
-  resultEntryId?: string;
-  call?: ToolCall;
-  result?: Result;
+export interface ProfileCall extends ToolPair {
   arguments: TokenEstimate;
   resultSize: TokenEstimate;
   retained: TokenEstimate;
@@ -87,40 +78,20 @@ function truncated(result: Result | undefined): boolean {
 /** Reconstruct only the active branch, including summarized-away calls, without runtime hooks or writes. */
 export function analyzeTools(branch: readonly SessionEntry[], contextEntries: readonly SessionEntry[], cwd: string): ToolProfile {
   const retained = new Map(contextEntries.map((entry) => [entry.id, convertToLlm(sessionEntryToContextMessages(entry))]));
-  const calls: ProfileCall[] = [];
-  const pending = new Map<string, ProfileCall[]>();
-  for (const entry of branch) {
-    if (entry.type !== "message") continue;
-    const message = entry.message;
-    if (message.role === "assistant") {
-      for (const [index, block] of (Array.isArray(message.content) ? message.content : []).entries()) {
-        if (block.type !== "toolCall") continue;
-        const projected = retained.get(entry.id)?.flatMap((m) => m.role === "assistant" ? m.content : []).find((b) => b.type === "toolCall" && b.id === block.id);
-        const call: ProfileCall = {
-          id: `call:${entry.id}:${index}`, tool: block.name, callId: block.id, entryId: entry.id, call: block,
-          arguments: contentEstimate(block), resultSize: emptyEstimate(), retained: projected ? contentEstimate(projected) : emptyEstimate(),
-          requestInput: hasUsage(message.usage) ? inputTokens(message.usage) : undefined, signals: [],
-        };
-        calls.push(call);
-        const key = JSON.stringify([block.id, block.name]);
-        const queue = pending.get(key) ?? [];
-        queue.push(call); pending.set(key, queue);
-      }
-    } else if (message.role === "toolResult") {
-      const key = JSON.stringify([message.toolCallId, message.toolName]);
-      const queue = pending.get(key);
-      const call = queue?.shift() ?? {
-        id: `result:${entry.id}`, tool: message.toolName, callId: message.toolCallId,
-        arguments: emptyEstimate(), resultSize: emptyEstimate(), retained: emptyEstimate(), signals: [],
-      } as ProfileCall;
-      if (!queue?.length) pending.delete(key);
-      if (!call.call) calls.push(call);
-      call.result = message;
-      call.resultEntryId = entry.id;
-      call.resultSize = contentEstimate(message.content);
-      call.retained = sumEstimates([call.retained, ...retained.get(entry.id)?.map((m) => contentEstimate(m.content)) ?? []]);
-    }
-  }
+  const entries = new Map(branch.map((entry) => [entry.id, entry]));
+  const calls: ProfileCall[] = pairToolCalls(branch).map((pair) => {
+    const entry = pair.entryId ? entries.get(pair.entryId) : undefined;
+    const usage = entry?.type === "message" && entry.message.role === "assistant" ? entry.message.usage : undefined;
+    const projected = pair.entryId ? retained.get(pair.entryId)?.flatMap((m) => m.role === "assistant" ? m.content : [])
+      .find((b) => b.type === "toolCall" && b.id === pair.callId && b.name === pair.tool) : undefined;
+    return {
+      ...pair, arguments: pair.call ? contentEstimate(pair.call) : emptyEstimate(),
+      resultSize: pair.result ? contentEstimate(pair.result.content) : emptyEstimate(),
+      retained: sumEstimates([projected ? contentEstimate(projected) : emptyEstimate(),
+        ...(pair.resultEntryId ? retained.get(pair.resultEntryId)?.map((m) => contentEstimate(m.content)) ?? [] : [])]),
+      requestInput: hasUsage(usage) ? inputTokens(usage) : undefined, signals: [],
+    };
+  });
 
   const entryOrder = new Map(branch.map((entry, index) => [entry.id, index]));
   const previousByTool = new Map<string, ProfileCall[]>();
@@ -197,13 +168,13 @@ function indicator(errors: number, signals: number, missing: number): Section["i
   return errors ? { text: "!", tone: "error" } : signals ? { text: "?", tone: "warning" } : missing ? { text: "…", tone: "muted" } : undefined;
 }
 function callSection(call: ProfileCall): Section {
-  const title = `${call.tool} · ${call.callId}`;
+  const title = `Call + result · ${call.tool} · ${call.callId}`;
   return {
     titleHighlights: call.result?.isError === true ? toned(title, "error").highlights : undefined,
     id: call.id, title, status: "reference", source: `Branch call/result analysis · ${call.entryId ?? "no call"} → ${call.resultEntryId ?? "no result"}`,
     estimate: sumEstimates([call.arguments, call.resultSize]), sortTokens: call.resultSize.tokens,
     indicator: indicator(call.result?.isError ? 1 : 0, call.signals.filter((s) => signalTone(s.kind) === "warning").length, !call.result || !call.call ? 1 : 0),
-    ...rich`Tool: ${call.tool}\nCall ID: ${call.callId}\nCall entry: ${call.entryId ?? toned("unmatched result", "muted")}\nResult entry: ${call.resultEntryId ?? toned("not recorded", "muted")}\nArguments + name: ${toned(formatEstimate(call.arguments), "accent")}\nResult: ${toned(formatEstimate(call.resultSize), call.resultSize.tokens >= LARGE_RESULT ? "warning" : "accent")}\nCurrently retained call + result: ${toned(formatEstimate(call.retained), "accent")}\nProvider request input at call issuance: ${call.requestInput?.toLocaleString() ?? "unknown"} tokens\nThis input produced the call, before its result existed. Shared by parallel calls; NOT a per-tool charge.\n\nSignals:\n${signalText(call)}\n\nArguments:\n${call.call ? jsonText(call.call.arguments) : "No matching call on this branch."}\n\nResult${call.result?.isError ? toned(" (error)", "error") : ""}:\n${call.result ? (call.result.isError === true ? toned(contentText(call.result.content), "error") : contentText(call.result.content)) : toned("No recorded result (possibly pending or interrupted).", "muted")}\n\n${ESTIMATE_NOTE}`,
+    ...rich`${call.call ? toolCallView(call.tool, call.callId, call.call.arguments) : toned("▶ TOOL CALL · No matching call on this branch.", "muted")}\n\n${call.result ? toolResultView(call.tool, call.callId, contentText(call.result.content), call.result.isError === true) : toned("◀ TOOL RESULT · No recorded result (possibly pending or interrupted).", "muted")}\n\n${toned("── Call statistics & diagnostics ──", "dim")}\nTool: ${call.tool}\nCall ID: ${call.callId}\nCall entry: ${call.entryId ?? toned("unmatched result", "muted")}\nResult entry: ${call.resultEntryId ?? toned("not recorded", "muted")}\nArguments + name: ${toned(formatEstimate(call.arguments), "accent")}\nResult: ${toned(formatEstimate(call.resultSize), call.resultSize.tokens >= LARGE_RESULT ? "warning" : "accent")}\nCurrently retained call + result: ${toned(formatEstimate(call.retained), "accent")}\nProvider request input at call issuance: ${call.requestInput?.toLocaleString() ?? "unknown"} tokens\nThis input produced the call, before its result existed. Shared by parallel calls; NOT a per-tool charge.\n\nSignals:\n${signalText(call)}\n\n${ESTIMATE_NOTE}`,
     raw: call,
   };
 }

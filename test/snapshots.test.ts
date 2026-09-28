@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { buildPreview, CAPTURE_LIMIT, contentText, diffSnapshot, makeDiff, RequestHistory, requestSnapshot } from "../src/snapshots.ts";
-import { EDIT_ERROR, fixture } from "./fixtures.ts";
+import { EDIT_ERROR, fixture, usage } from "./fixtures.ts";
 
 const metadata = { capturedAt: "2026-01-01", sessionId: "session", leafId: "leaf", model: "test/model" };
 test("preview includes hidden messages and wrapped summary, distinguishes UI-only and omitted history", (t) => {
@@ -62,17 +62,59 @@ test("Preview colors failed tool results from metadata, never from their wording
     content: [{ type: "text", text: EDIT_ERROR }], timestamp: 1, isError }));
   const preview = buildPreview(ctx, pi);
   const [failed, successful] = ids.map((id) => preview.sections.find((s) => s.id === id)!);
-  assert.equal(failed.text, `[toolResult]\n${EDIT_ERROR}`);
+  assert.ok(failed.text.startsWith("◀ TOOL RESULT · edit (error)"));
+  assert.ok(failed.text.endsWith(`Output:\n${EDIT_ERROR}`));
+  assert.ok(failed.text.includes("No matching call on this branch."));
   assert.deepEqual(failed.indicator, { text: "!", tone: "error" });
   assert.deepEqual(failed.titleHighlights, [{ start: 0, end: failed.title.length, tone: "error" }]);
-  assert.deepEqual(failed.highlights, [{ start: "[toolResult]\n".length, end: failed.text.length, tone: "error" }]);
-  assert.equal(successful.text, failed.text);
-  assert.deepEqual(successful.highlights, []);
-  assert.equal(successful.titleHighlights, undefined);
+  assert.ok(failed.highlights?.some((h) => h.tone === "error" && failed.text.slice(h.start, h.end) === EDIT_ERROR));
+  assert.ok(successful.text.endsWith(EDIT_ERROR));
+  assert.ok(successful.highlights?.every((h) => h.end <= successful.text.indexOf(EDIT_ERROR)));
+  assert.deepEqual(successful.titleHighlights, [{ start: 0, end: successful.title.length, tone: "mdHeading" }]);
   assert.equal(successful.indicator, undefined);
   assert.deepEqual(failed.estimate, successful.estimate, "styling must not add model-visible content or token costs");
   assert.equal(preview.sections.length, before.sections.length + 2);
   assert.equal(JSON.stringify(preview).includes("\\u001b"), false);
+});
+
+test("Preview shows parameters beside matched results without double counting or matching parallel siblings by position", (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const manager = SessionManager.open(f.path);
+  const ctx = { sessionManager: manager, getSystemPrompt: () => "", getSystemPromptOptions: () => ({}), getContextUsage: () => undefined } as unknown as ExtensionCommandContext;
+  const pi = { getActiveTools: () => [], getAllTools: () => [] } as unknown as ExtensionAPI;
+  const callId = manager.appendMessage({ role: "assistant", content: [
+    { type: "text", text: "Narration before the calls" },
+    { type: "toolCall", id: "one", name: "read", arguments: { path: "first.ts", offset: 7 } },
+    { type: "toolCall", id: "two", name: "read", arguments: { path: "second.ts", limit: 3 } },
+  ], provider: "context-test", model: "fixture", api: "openai-completions", stopReason: "toolUse", timestamp: 1, usage });
+  const resultId = manager.appendMessage({ role: "toolResult", toolName: "read", toolCallId: "two", content: [{ type: "text", text: "second result" }], timestamp: 2, isError: false });
+  const firstResult = manager.appendMessage({ role: "toolResult", toolName: "read", toolCallId: "one", content: [{ type: "text", text: "first result" }], timestamp: 3, isError: false });
+  const original = JSON.stringify(manager.getBranch());
+  const preview = buildPreview(ctx, pi);
+  const call = preview.sections.find((s) => s.id === callId)!;
+  const result = preview.sections.find((s) => s.id === resultId)!;
+  assert.equal(call.title, "Calls (2) · read, read");
+  assert.ok(call.text.startsWith("▶ TOOL CALL · read\nCall ID: one\nParameters:\n"));
+  assert.ok(call.text.includes('"offset": 7'));
+  assert.ok(call.text.includes('"limit": 3'));
+  assert.ok(call.text.endsWith("Narration before the calls"));
+  assert.equal(result.title, "Result · read");
+  assert.ok(result.text.startsWith("◀ TOOL RESULT · read\nCall ID: two"));
+  assert.ok(result.text.includes("Originating call parameters (reference only):"));
+  assert.ok(result.text.includes('"path": "second.ts"'));
+  assert.ok(!result.text.includes("first.ts"));
+  assert.ok(preview.sections.find((s) => s.id === firstResult)!.text.includes("first.ts"));
+  assert.equal(result.estimate?.tokens, Math.ceil("second result".length / 4));
+  const total = (preview.sections[0].raw as any).estimate.tokens;
+  assert.equal(total, preview.sections.reduce((sum, s) => sum + (s.estimate?.tokens ?? 0), 0));
+  assert.equal(JSON.stringify(manager.getBranch()), original);
+  assert.ok(!JSON.stringify(result.raw).includes("second.ts"), "raw result remains the result, not the reference call");
+  const compactedContext = {
+    ...ctx, sessionManager: { getBranch: () => manager.getBranch(), buildContextEntries: () => manager.getBranch().filter((e) => e.id === resultId) },
+  } as unknown as ExtensionCommandContext;
+  const compacted = buildPreview(compactedContext, pi);
+  assert.ok(compacted.sections.find((s) => s.id === resultId)!.text.includes('"path": "second.ts"'));
+  assert.equal((compacted.sections[0].raw as any).estimate.tokens, result.estimate!.tokens, "a historical call reference is not retained context");
 });
 
 test("captures snapshot payloads without mutation; only last two are retained", () => {

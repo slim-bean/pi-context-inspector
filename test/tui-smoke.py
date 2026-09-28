@@ -142,6 +142,11 @@ def main():
         mark = command_line("/context")
         wait_for("Context inspector", mark)
         wait_for("System instructions", mark)
+        send("/fixture-read-1"); send("\r")
+        wait_for("TOOL CALL · read", mark)
+        wait_for("Parameters:", mark)
+        wait_for('"path": "README.md"', mark)
+        send("1")  # reset the filter
         send("/compaction")
         send("\r")
         wait_for("Compaction summary", mark)
@@ -164,6 +169,8 @@ def main():
         send("/Could not find edits[1]"); send("\r")
         wait_for("Result · edit", mark)
         wait_for("Could not find edits[1]", mark)
+        wait_for("Originating call parameters (reference only):", mark)
+        wait_for('"path": "README.md"', mark)
         send("l")
         send("\x1b"); settle()
 
@@ -197,7 +204,7 @@ def main():
         send("\r")  # leave search
         mark = send("\r")  # drill into call/result pairs
         wait_for("fixture-read-1", mark)
-        wait_for("Arguments + name:", mark)
+        wait_for("Parameters:", mark)
         send("s")
         send("\t")
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 70, 0, 0))
@@ -241,6 +248,10 @@ def main():
         assert tool_group["indicator"] == {"text": "?", "tone": "warning"}
         failed_result = next(s for s in export["preview"]["sections"] if s["id"] == "tool-result-error")
         assert failed_result["indicator"] == {"text": "!", "tone": "error"}
+        assert '"path": "README.md"' in failed_result["text"]
+        call_section = next(s for s in export["preview"]["sections"] if s["id"] == "tool-assistant-1")
+        assert call_section["title"] == "Call · read"
+        assert "Parameters:" in call_section["text"]
         assert any(h["tone"] == "error" and "Could not find edits[1]" in failed_result["text"][h["start"]:h["end"]] for h in failed_result["highlights"])
         assert "\x1b" not in failed_result["text"], "Exported error text stays plain"
         assert export["requests"][-1]["usage"]["cacheRead"] == 40

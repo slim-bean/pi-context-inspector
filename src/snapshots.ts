@@ -6,6 +6,9 @@ import {
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { createTwoFilesPatch } from "diff";
+import { contentText, contentView, jsonText, parameterText, toolLabel, toolResultView } from "./content.ts";
+import { pairToolCalls } from "./tool-pairs.ts";
+export { contentText, jsonText } from "./content.ts";
 import { contentEstimate, emptyEstimate, ESTIMATE_NOTE, formatEstimate, jsonEstimate, sumEstimates, textEstimate, usageText, type TokenEstimate } from "./metrics.ts";
 
 import { joinRich, rich, shareBar, toned, type Highlight, type Tone } from "./presentation.ts";
@@ -75,29 +78,6 @@ export class RequestHistory {
   }
 }
 
-export function jsonText(value: unknown): string {
-  return JSON.stringify(value, null, 2) ?? String(value);
-}
-
-/** Human-readable representation; raw view/export always retains the original object. */
-export function contentText(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map(contentText).join("\n\n");
-  if (!value || typeof value !== "object") return String(value ?? "");
-  const v = value as Record<string, unknown>;
-  if (v.type === "image" || v.type === "image_url" || v.type === "input_image") {
-    return `[image: ${v.mimeType ?? v.mediaType ?? "see raw view"}]`;
-  }
-  if (v.type === "thinking") {
-    return `[thinking]\n${v.thinking || "Opaque/signed reasoning; see raw view."}`;
-  }
-  if (v.type === "toolCall") return `[tool call: ${v.name}]\n${jsonText(v.arguments)}`;
-  if (typeof v.text === "string") return v.text;
-  if (v.content !== undefined) return contentText(v.content);
-  if (typeof v.summary === "string") return v.summary;
-  return jsonText(value);
-}
-
 export function makeDiff(before: string, after: string, beforeName = "previous", afterName = "current"): string {
   if (before === after) return "No changes.";
   // Keep synchronous rendering bounded even for huge, entirely different prompts.
@@ -145,6 +125,7 @@ export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Sn
   const contextEntries = ctx.sessionManager.buildContextEntries();
   const selected = new Set(contextEntries.map((e) => e.id));
   const currentCompaction = activeCompaction(branch);
+  const resultPairs = new Map(pairToolCalls(branch).filter((p) => p.resultEntryId).map((p) => [p.resultEntryId!, p]));
   for (const entry of contextEntries) {
     const messages = sessionEntryToContextMessages(entry);
     const llm = convertToLlm(messages);
@@ -165,22 +146,30 @@ export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Sn
       }
     }
     const hidden = entry.type === "custom_message" && !entry.display;
-    const title = entry.type === "compaction" ? "Compaction summary"
+    const tool = entry.type === "message" ? toolLabel(entry.message) : undefined;
+    const title = tool?.title ?? (entry.type === "compaction" ? "Compaction summary"
       : entry.type === "branch_summary" ? "Branch summary"
       : entry.type === "custom_message" ? `Extension · ${entry.customType}${hidden ? " (hidden in chat)" : ""}`
       : entry.type === "custom" ? `UI/state · ${entry.customType}`
       : role === "toolResult" && entry.type === "message" ? `Result · ${entry.message.role === "toolResult" ? entry.message.toolName : "tool"}`
-      : role;
+      : role);
     const isToolError = entry.type === "message" && entry.message.role === "toolResult" && entry.message.isError === true;
     sections.push({
       id: entry.id, title, source: `Session entry ${entry.id}`,
-      titleHighlights: isToolError ? toned(title, "error").highlights : undefined,
+      titleHighlights: tool ? toned(title, tool.tone).highlights : undefined,
       indicator: isToolError ? { text: "!", tone: "error" } : undefined,
       status: llm.length > 0 ? "included" : "excluded",
       // Show the actual compaction wrapper and its user role, not just summary text.
       ...(llm.length > 0
-        ? joinRich(llm.map((m) => rich`[${m.role}]\n${m.role === "toolResult" && m.isError === true
-          ? toned(contentText(m.content), "error") : contentText(m.content)}`), "\n\n")
+        ? joinRich(llm.map((m) => {
+          if (m.role === "toolResult") {
+            const pair = resultPairs.get(entry.id);
+            const reference = rich`${toned("Originating call parameters (reference only):", "dim")}\n${pair?.call
+              ? `Recorded call entry: ${pair.entryId}\n${parameterText(pair.call.arguments)}` : "No matching call on this branch."}`;
+            return toolResultView(m.toolName, m.toolCallId, contentText(m.content), m.isError === true, reference);
+          }
+          return toolLabel(m) ? contentView(m) : rich`[${m.role}]\n${contentView(m.content)}`;
+        }), "\n\n")
         : rich`Not sent by pi's message conversion.\n\n${jsonText(entry)}`),
       raw: entry,
       estimate: llm.length ? sumEstimates(estimates) : undefined,
@@ -233,10 +222,14 @@ export function requestSnapshot(history: RequestHistory): Snapshot {
     if (payload && typeof payload === "object" && !Array.isArray(payload)) {
       for (const [key, value] of Object.entries(payload)) {
         if ((key === "messages" || key === "input" || key === "tools") && Array.isArray(value)) {
-          value.forEach((item, index) => sections.push({
-            id: `${key}:${index}`, title: `${key} ${index + 1} · ${item?.role ?? item?.name ?? item?.type ?? "item"}`,
-            source: `payload.${key}[${index}]`, status: "captured", text: contentText(item), raw: item,
-          }));
+          value.forEach((item, index) => {
+            const tool = key === "tools" ? undefined : toolLabel(item);
+            const title = tool ? `${tool.title} · ${key} ${index + 1}` : `${key} ${index + 1} · ${item?.role ?? item?.name ?? item?.type ?? "item"}`;
+            sections.push({
+              id: `${key}:${index}`, title, titleHighlights: tool ? toned(title, tool.tone).highlights : undefined,
+              source: `payload.${key}[${index}]`, status: "captured", ...contentView(item), raw: item,
+            });
+          });
         } else {
           sections.push({ id: key, title: key, source: `payload.${key}`, status: "captured", text: contentText(value), raw: value });
         }

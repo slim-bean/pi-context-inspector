@@ -258,7 +258,9 @@ export class Inspector implements Component, Focusable {
       row(` ${th.bold("Context inspector")} · ${this.state.following ? "FOLLOW" : "LIVE"}   ${tabs}`),
       row(` ${th.fg("muted", terminalLine(this.snapshot.description))}`),
       row(this.searching ? this.search.render(inner)[0] : ` / Search: ${terminalLine(this.state.query || "(all)")} · ${this.filtered.length} sections · ${this.state.sorted ? "size ↓" : "default order"} · ${this.focus} · ${this.state.raw ? "raw" : "text"}${this.state.drillId ? " · Backspace: up" : ""}`),
-      row(th.fg("dim", "─".repeat(inner))),
+      row(split
+        ? `${pad(th.fg("dim", " Sections"), leftWidth)} ${th.fg("border", "│")} ${pad(section ? paint(section.title, section.titleHighlights ?? [], th, true) : "Content", contentWidth)}`
+        : this.focus === "content" && section ? paint(section.title, section.titleHighlights ?? [], th, true) : th.fg("dim", " Sections")),
     ];
     const left = this.list!.render(leftWidth);
     const right = this.wrapped.slice(this.scroll, this.scroll + this.bodyHeight);
