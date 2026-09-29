@@ -8,8 +8,10 @@ import {
 import { createTwoFilesPatch } from "diff";
 import { contentText, contentView, jsonText, parameterText, toolLabel, toolResultView } from "./content.ts";
 import { pairToolCalls } from "./tool-pairs.ts";
+import { analyzeInstructions, capturedInstructions } from "./instructions.ts";
+import { instructionDelta, instructionSection, instructionSummary } from "./instruction-view.ts";
 export { contentText, jsonText } from "./content.ts";
-import { contentEstimate, emptyEstimate, ESTIMATE_NOTE, formatEstimate, jsonEstimate, sumEstimates, textEstimate, usageText, type TokenEstimate } from "./metrics.ts";
+import { contentEstimate, emptyEstimate, ESTIMATE_NOTE, formatEstimate, jsonEstimate, object, sumEstimates, textEstimate, usageText, type TokenEstimate } from "./metrics.ts";
 
 import { joinRich, rich, shareBar, toned, type Highlight, type Tone } from "./presentation.ts";
 
@@ -101,11 +103,13 @@ export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Sn
   const categories = new Map<string, TokenEstimate>();
   const add = (category: string, value: TokenEstimate) => categories.set(category, sumEstimates([categories.get(category) ?? emptyEstimate(), value]));
   const system = ctx.getSystemPrompt();
-  add("System instructions", textEstimate(system));
+  const instructions = analyzeInstructions(system, "ctx.getSystemPrompt()", options);
+  for (const [name, cost] of Object.entries(instructions.categories)) add(name, { ...emptyEstimate(), tokens: cost.tokens });
   sections.push({
     id: "system", title: "System instructions", source: "ctx.getSystemPrompt() — current pi prompt",
     status: "included", text: system, raw: system, estimate: textEstimate(system),
   });
+  sections.push(instructionSection(instructions, "instruction-breakdown", "Instruction costs · skills, files & rules"));
   sections.push({
     id: "prompt-inputs", title: "System prompt sources", source: "Base construction inputs (reference, not extra messages)",
     status: "reference", text: jsonText(options), raw: options,
@@ -127,6 +131,17 @@ export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Sn
   const currentCompaction = activeCompaction(branch);
   const resultPairs = new Map(pairToolCalls(branch).filter((p) => p.resultEntryId).map((p) => [p.resultEntryId!, p]));
   for (const entry of contextEntries) {
+    // Newer Pi persists system state/deltas. The current rendered prompt above
+    // already accounts for them; don't charge their storage representation again.
+    if (entry.type === "message" && object(entry.message).role === "system") {
+      sections.push({
+        id: entry.id, title: "Recorded system instructions", status: "reference",
+        source: `Session entry ${entry.id} · current rendered instructions counted in System instructions`,
+        text: `Recorded system state/update (reference only). Preview measures the current rendered prompt, not cumulative historical system updates. Last request shows the captured provider representation.\n\n${jsonText(entry.message)}`,
+        raw: entry,
+      });
+      continue;
+    }
     const messages = sessionEntryToContextMessages(entry);
     const llm = convertToLlm(messages);
     const role = entry.type === "message" ? entry.message.role : entry.type;
@@ -189,14 +204,14 @@ export function buildPreview(ctx: ExtensionCommandContext, pi: ExtensionAPI): Sn
   const breakdown = [...categories].sort((a, b) => b[1].tokens - a[1].tokens);
   const largest = sections.filter((s) => s.estimate).sort((a, b) => b.estimate!.tokens - a.estimate!.tokens).slice(0, 10);
   const categoryTones: Record<string, Tone> = {
-    "System instructions": "accent", "Tool definitions": "mdCode", "User / shell messages": "success",
+    "Base / other instructions": "accent", "Skill descriptions": "warning", "Skill names, paths & framing": "mdCode", "Project instructions": "success", "Tool definitions": "mdCode", "User / shell messages": "success",
     "Assistant text": "mdHeading", "Visible reasoning": "thinkingText", "Tool-call arguments + names": "mdCode",
     "Tool results": "accent", "Compaction summary": "success", "Branch summary": "success", "Extension messages": "thinkingText",
   };
   const bars = joinRich(breakdown.map(([name, value]) => rich`${shareBar(value.tokens, total.tokens, categoryTones[name] ?? "accent")} ${toned(formatEstimate(value).padStart(18), "accent")}  ${total.tokens ? (value.tokens / total.tokens * 100).toFixed(1) : "0.0"}%  ${name}`));
   sections.unshift({
     id: "context-overview", title: "Context usage & legend", status: "reference", source: "Local measurements; not extra model context",
-    ...rich`${toned(contextLabel, "accent")}\nVisible-content estimate: ${toned(formatEstimate(total), "accent")}\n\n${toned("+", "success")} Included in reconstructed context\n${toned("·", "dim")} Reference only (not additional context)\n${toned("−", "muted")} Excluded from context\nRaw JSON includes storage metadata; display labels are not sent.\n\nBreakdown (share of estimated visible tokens):\n${bars}\n\nLargest included sections:\n${largest.map((s) => `${formatEstimate(s.estimate!)}  ${s.title} · ${s.id}`).join("\n")}\n\n${ESTIMATE_NOTE}\nImages: ${total.images}; opaque/unknown blocks: ${total.opaque}. Pi's overall estimate may use response usage and a different estimation method; these totals need not match.\nPreview is not a final request: hooks, image settings and provider conversion may change it.`,
+    ...rich`${toned(contextLabel, "accent")}\nVisible-content estimate: ${toned(formatEstimate(total), "accent")}\n${instructionSummary(instructions)}\nSee Instruction costs for per-skill descriptions, paths, files and rules.\n\n${toned("+", "success")} Included in reconstructed context\n${toned("·", "dim")} Reference only (not additional context)\n${toned("−", "muted")} Excluded from context\nRaw JSON includes storage metadata; display labels are not sent.\n\nBreakdown (share of estimated visible tokens):\n${bars}\n\nLargest included sections:\n${largest.map((s) => `${formatEstimate(s.estimate!)}  ${s.title} · ${s.id}`).join("\n")}\n\n${ESTIMATE_NOTE}\nImages: ${total.images}; opaque/unknown blocks: ${total.opaque}. Pi's overall estimate may use response usage and a different estimation method; these totals need not match.\nPreview is not a final request: hooks, image settings and provider conversion may change it.`,
     raw: { contextUsage: usage, estimate: total, categories: Object.fromEntries(categories), method: ESTIMATE_NOTE },
   });
   return {
@@ -218,6 +233,8 @@ export function requestSnapshot(history: RequestHistory): Snapshot {
       text: `${usageText(capture.usage)}\n\n${jsonText({ capturedAt: capture.capturedAt, model: capture.model, leafId: capture.leafId })}\n\nCaptured at this extension's hook; later hooks may change it. Settings are not conversation tokens. Full provider payload repeats the sections below; do not count it twice. Provider-specific payload sections are not assigned misleading JSON token counts.`,
       raw: { ...capture, payload: undefined, json: undefined },
     });
+    const instructionProfile = capturedInstructions(capture.payload);
+    if (instructionProfile) sections.push(instructionSection(instructionProfile, "request-instructions", "Instruction costs · captured text"));
     const payload = capture.payload;
     if (payload && typeof payload === "object" && !Array.isArray(payload)) {
       for (const [key, value] of Object.entries(payload)) {
@@ -242,6 +259,7 @@ export function requestSnapshot(history: RequestHistory): Snapshot {
 
 export function diffSnapshot(history: RequestHistory): Snapshot {
   const { previous, latest } = history;
+  const before = previous && capturedInstructions(previous.payload), after = latest && capturedInstructions(latest.payload);
   return {
     kind: "diff", title: "Request changes",
     description: "Diff of the last two captured provider payloads. A changed prefix may reduce cache reuse; this is not a token-level cache prediction.",
@@ -249,6 +267,6 @@ export function diffSnapshot(history: RequestHistory): Snapshot {
       id: "diff", title: "Previous → latest request", source: `${previous.capturedAt} → ${latest.capturedAt}`,
       status: "reference", text: makeDiff(previous.json, latest.json),
       raw: { previous: previous.payload, latest: latest.payload },
-    }] : [],
+    }, ...(before && after ? [instructionDelta(before, after)] : [])] : [],
   };
 }

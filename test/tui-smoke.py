@@ -75,6 +75,9 @@ def main():
         "baseUrl": f"http://127.0.0.1:{server.server_port}/v1", "api": "openai-completions", "apiKey": "local-test-only",
         "models": [{"id": "fixture", "reasoning": False, "contextWindow": 128000, "maxTokens": 4096}],
     }}}))
+    skill = temp / "fixture-skill" / "SKILL.md"
+    skill.parent.mkdir()
+    skill.write_text("---\nname: fixture-skill\ndescription: fixture skill routing instructions for safe local testing\n---\nFull skill body is not advertised in the catalog.\n")
     session = temp / "fixture.jsonl"
     fixture = subprocess.check_output([
         NODE, "--import", "tsx", "--input-type=module", "-e",
@@ -83,7 +86,7 @@ def main():
     entries = json.loads(fixture)
     session.write_text("".join(json.dumps(e) + "\n" for e in entries))
     original = next(e["summary"] for e in entries if e["type"] == "compaction")
-    command = [NODE, str(CLI), "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-themes", "--no-approve", "--provider", "context-test", "--model", "fixture", "--thinking", "off", "--session", str(session), "-e", str(ROOT / "src/index.ts")]
+    command = [NODE, str(CLI), "--offline", "--no-extensions", "--no-skills", "--skill", str(skill), "--no-prompt-templates", "--no-context-files", "--no-themes", "--no-approve", "--provider", "context-test", "--model", "fixture", "--thinking", "off", "--session", str(session), "-e", str(ROOT / "src/index.ts")]
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(project)
@@ -162,6 +165,16 @@ def main():
         settle()
         send("\x1b")
         settle()
+
+        # Itemize an explicitly loaded synthetic skill; default discovery remains disabled.
+        mark = command_line("/context")
+        wait_for("Context inspector", mark)
+        send("/Instruction attribution"); send("\r"); send("\r")
+        send("/Skill catalog"); send("\r"); send("\r")
+        mark = send("/Skill · fixture-skill"); send("\r"); send("\r")
+        wait_for("fixture skill routing instructions", mark)
+        send("s"); send("\x7f"); send("\x7f")
+        send("\x1b"); settle()
 
         # Failed tool results are visible in Preview without extra model calls.
         mark = command_line("/context")
@@ -242,6 +255,11 @@ def main():
         assert export["growth"]["kind"] == "growth"
         overview = export["preview"]["sections"][0]
         assert overview["raw"]["estimate"]["tokens"] > 0
+        assert overview["raw"]["categories"]["Skill descriptions"]["tokens"] > 0
+        instruction_profile = next(s["raw"] for s in export["preview"]["sections"] if s["id"] == "instruction-breakdown")
+        assert len(instruction_profile["skills"]) == 1
+        assert instruction_profile["skills"][0]["name"] == "fixture-skill"
+        assert sum(v["tokens"] for v in instruction_profile["categories"].values()) == instruction_profile["tokens"]
         assert overview["highlights"] and "█" in overview["text"]
         assert "\x1b" not in overview["text"], "Rendering must not embed ANSI in exports"
         tool_group = next(s for s in export["tools"]["sections"] if s["id"] == "tool-stats:read")

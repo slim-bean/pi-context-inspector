@@ -1,13 +1,14 @@
 {
   "name": "pi-context-inspector",
-  "version": "0.4.0",
+  "version": "0.5.0",
+  "license": "MIT",
   "description": "Inspect pi context, profile token/tool usage, and edit saved compaction summaries from a terminal overlay.",
   "repository": { "type": "git", "url": "https://github.com/slim-bean/pi-context-inspector.git" },
   "homepage": "https://github.com/slim-bean/pi-context-inspector#readme",
   "bugs": { "url": "https://github.com/slim-bean/pi-context-inspector/issues" },
   "type": "module",
   "keywords": ["pi-package"],
-  "files": ["src", "README.md"],
+  "files": ["src", "README.md", "LICENSE"],
   "pi": { "extensions": ["./src/index.ts"] },
   "engines": { "node": ">=22.19.0" },
   "scripts": {

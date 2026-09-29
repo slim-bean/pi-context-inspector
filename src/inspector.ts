@@ -91,12 +91,22 @@ export class Inspector implements Component, Focusable {
   private get snapshot(): Snapshot { return this.snapshots[this.state.tab] ?? this.snapshots[0]; }
   private get selected(): Section | undefined { return this.filtered[this.index]; }
 
+  private sectionPath(id: string | undefined, sections = this.snapshot.sections): Section[] {
+    if (!id) return [];
+    for (const section of sections) {
+      if (section.id === id) return [section];
+      const child = this.sectionPath(id, section.children ?? []);
+      if (child.length) return [section, ...child];
+    }
+    return [];
+  }
+
   private ensureList(): void {
     const key = `${this.state.tab}:${this.state.query}:${this.bodyHeight}:${this.state.sorted}:${this.state.drillId}`;
     if (this.list && key === this.listKey) return;
     const query = this.state.query.toLowerCase();
     const flatten = (sections: Section[]): Section[] => sections.flatMap((s) => [s, ...flatten(s.children ?? [])]);
-    const group = this.snapshot.sections.find((s) => s.id === this.state.drillId);
+    const group = this.sectionPath(this.state.drillId).at(-1);
     const sections = group?.children ?? this.snapshot.sections;
     // Stable within a group: filtering/sorting must not change the size-color scale.
     this.largestEstimate = sections.reduce((largest, s) => Math.max(largest, s.estimate?.tokens ?? 0), 0);
@@ -176,7 +186,7 @@ export class Inspector implements Component, Focusable {
     } else if (matchesKey(data, "backspace") && this.state.drillId) {
       this.state.following = false;
       this.state.sectionId = this.state.drillId;
-      this.state.drillId = undefined;
+      this.state.drillId = this.sectionPath(this.state.drillId).at(-2)?.id;
       this.state.query = "";
       this.search.setValue("");
       this.focus = "list";

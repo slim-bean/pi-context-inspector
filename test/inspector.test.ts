@@ -108,6 +108,28 @@ test("size sorting, tool drilldown/back navigation and nested search preserve re
   assert.equal(reopened.state.tab, 4);
 });
 
+test("nested instruction drill-down, sorting, search and back navigation keep the right parent", () => {
+  const field = { id: "description", title: "Description", source: "fixture skill", status: "reference" as const, text: "routing description", raw: {} };
+  const skill = { ...field, id: "skill", title: "Skill · fixture", children: [field] };
+  const catalog = { ...field, id: "catalog", title: "Skill catalog", children: [skill] };
+  const group = { ...field, id: "instructions", title: "Instruction costs", children: [catalog] };
+  const view: Snapshot = { kind: "preview", title: "test", description: "test", sections: [group] };
+  const inspector = new Inspector([view], theme, kb, () => 30, () => {}, () => {});
+  inspector.render(130);
+  for (const id of ["instructions", "catalog", "skill"]) {
+    inspector.handleInput("\r"); inspector.render(130);
+    assert.equal(inspector.state.drillId, id);
+  }
+  assert.equal(inspector.state.sectionId, "description");
+  inspector.handleInput("s"); inspector.updateSnapshots([view]); inspector.render(70);
+  assert.equal(inspector.state.sectionId, "description");
+  for (const id of ["catalog", "instructions", undefined]) {
+    inspector.handleInput("\x7f"); inspector.render(130);
+    assert.equal(inspector.state.drillId, id);
+  }
+  assert.equal(inspector.state.sectionId, "instructions");
+});
+
 test("hostile control sequences are shown literally, not executed", () => {
   const output = terminalText("before\x1b]52;c;CLIPBOARD\x07after\r\n\tend");
   assert.equal(output.includes("\x1b"), false);

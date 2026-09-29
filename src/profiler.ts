@@ -4,6 +4,8 @@ import { convertToLlm, sessionEntryToContextMessages, type SessionEntry } from "
 import type { Section, Snapshot } from "./snapshots.ts";
 import { contentText, toolCallView, toolResultView } from "./content.ts";
 import { pairToolCalls, type ToolPair, type ToolResult as Result } from "./tool-pairs.ts";
+import { RecordedInstructions } from "./instructions.ts";
+import { instructionSummary } from "./instruction-view.ts";
 import { contentEstimate, emptyEstimate, ESTIMATE_NOTE, formatEstimate, hasUsage, inputTokens, object, sumEstimates, usageText, type TokenEstimate } from "./metrics.ts";
 
 import { deltaTone, joinRich, rich, toned, type StyledText, type Tone } from "./presentation.ts";
@@ -220,10 +222,12 @@ export function growthSnapshot(branch: readonly SessionEntry[]): Snapshot {
   let boundary = "Start of branch";
   let results = emptyEstimate();
   let resultCount = 0;
+  const instructions = new RecordedInstructions();
   for (const entry of branch) {
     if (entry.type === "compaction") { previous = undefined; boundary = "Compaction boundary"; results = emptyEstimate(); resultCount = 0; }
     if (entry.type !== "message") continue;
     const message = entry.message;
+    instructions.observe(message);
     if (message.role === "toolResult") { results = sumEstimates([results, contentEstimate(message.content)]); resultCount++; }
     if (message.role !== "assistant") continue;
     const model = `${message.provider}/${message.model}`;
@@ -232,12 +236,18 @@ export function growthSnapshot(branch: readonly SessionEntry[]): Snapshot {
     const reason = input === undefined ? "Missing/all-zero usage" : previous && previous.model !== model ? "Model changed" : boundary;
     const change = delta === undefined ? `not compared (${reason})` : `${delta >= 0 ? "+" : ""}${delta.toLocaleString()} tokens`;
     const outputCalls = (Array.isArray(message.content) ? message.content : []).filter((b) => b.type === "toolCall");
+    const instructionProfile = instructions.profile;
+    const instructionCosts = instructionProfile ? {
+      tokens: instructionProfile.tokens, skillCount: instructionProfile.skills.length,
+      descriptionTokens: instructionProfile.categories["Skill descriptions"]?.tokens ?? 0,
+      catalogTokens: (instructionProfile.categories["Skill descriptions"]?.tokens ?? 0) + (instructionProfile.categories["Skill names, paths & framing"]?.tokens ?? 0),
+    } : undefined;
     const title = rich`${sections.length + 1} · input ${input?.toLocaleString() ?? "?"} · ${toned(`Δ ${delta === undefined ? "—" : `${delta >= 0 ? "+" : ""}${delta.toLocaleString()}`}`, deltaTone(delta))}`;
     sections.push({
       id: `growth:${entry.id}`, title: title.text, titleHighlights: title.highlights,
       status: "reference", source: `${entry.timestamp} · ${model} · ${entry.id}`, sortTokens: Math.abs(delta ?? 0),
-      ...rich`${model}\n${entry.timestamp}\nSession entry: ${entry.id}\nStop reason: ${message.stopReason}\n\n${usageText(message.usage)}\n\nInput growth since previous recorded response: ${toned(change, deltaTone(delta))}\nTool results recorded in the intervening gap: ${resultCount}, ${formatEstimate(results)}\nThis response issued ${outputCalls.length} tool calls: ${outputCalls.map((c) => c.name).join(", ") || "none"}\n\nGrowth includes intervening assistant output, user messages, tools, hooks, and other changes. The gap's tool results are not an exact explanation of the delta. Compaction/model changes and missing usage break comparisons. Error/aborted responses may report partial usage. Nested tool model usage and summarization usage are not main-request context.`,
-      raw: { entryId: entry.id, model, timestamp: entry.timestamp, usage: message.usage, delta, comparison: change, interveningToolResults: { count: resultCount, estimate: results } },
+      ...rich`${model}\n${entry.timestamp}\nSession entry: ${entry.id}\nStop reason: ${message.stopReason}\n\n${usageText(message.usage)}\n\nRecorded instruction state at this response:\n${instructionProfile ? instructionSummary(instructionProfile) : "Unavailable; today's Preview is not applied to historical responses."}\nVisible-text estimates from recorded system entries, not per-category provider usage; request hooks can change them.\n\nInput growth since previous recorded response: ${toned(change, deltaTone(delta))}\nTool results recorded in the intervening gap: ${resultCount}, ${formatEstimate(results)}\nThis response issued ${outputCalls.length} tool calls: ${outputCalls.map((c) => c.name).join(", ") || "none"}\n\nGrowth includes intervening assistant output, user messages, tools, hooks, and other changes. The gap's tool results are not an exact explanation of the delta. Compaction/model changes and missing usage break comparisons. Error/aborted responses may report partial usage. Nested tool model usage and summarization usage are not main-request context.`,
+      raw: { entryId: entry.id, model, timestamp: entry.timestamp, usage: message.usage, instructionCosts, delta, comparison: change, interveningToolResults: { count: resultCount, estimate: results } },
     });
     previous = input === undefined ? undefined : { input, model };
     boundary = "Previous response usage unavailable";

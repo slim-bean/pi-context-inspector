@@ -45,7 +45,7 @@ test("preview includes hidden messages and wrapped summary, distinguishes UI-onl
   assert.equal(snapshot.sections.find((s) => s.id === "excluded-bash")?.estimate, undefined);
   const raw = snapshot.sections[0].raw as any;
   assert.equal(raw.estimate.tokens, snapshot.sections.reduce((sum, section) => sum + (section.estimate?.tokens ?? 0), 0));
-  assert.equal(raw.categories["System instructions"].tokens, 4);
+  assert.equal(raw.categories["Base / other instructions"].tokens, 4);
   assert.ok(raw.categories["Tool definitions"].tokens > 0);
   assert.ok(raw.categories["Compaction summary"].tokens > 0);
 });

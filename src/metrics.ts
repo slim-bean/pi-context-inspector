@@ -13,6 +13,10 @@ export function sumEstimates(values: readonly TokenEstimate[]): TokenEstimate {
 export function textEstimate(text: string): TokenEstimate {
   return { tokens: Math.ceil(text.length / 4), images: 0, opaque: 0 };
 }
+/** Allocate slices of one text block without increasing its original rounded total. */
+export function textSliceEstimate(start: number, end: number): TokenEstimate {
+  return { tokens: Math.ceil(end / 4) - Math.ceil(start / 4), images: 0, opaque: 0 };
+}
 export function jsonEstimate(value: unknown): TokenEstimate {
   return textEstimate(JSON.stringify(value) ?? "");
 }
