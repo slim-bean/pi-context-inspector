@@ -1,6 +1,6 @@
 # pi-context-inspector
 
-A terminal-first pi extension for inspecting context, profiling token/tool usage, and correcting saved compaction summaries. Tested with pi **0.85.1**, Node 22.19+.
+A terminal-first pi extension for inspecting context, profiling token/tool usage, and correcting saved compaction summaries. Tested with pi **1.5.0** (including the isolated real-TUI smoke test), Node 22.19+.
 
 ## Install
 

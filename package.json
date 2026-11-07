@@ -3,29 +3,48 @@
   "version": "0.5.0",
   "license": "MIT",
   "description": "Inspect pi context, profile token/tool usage, and edit saved compaction summaries from a terminal overlay.",
-  "repository": { "type": "git", "url": "https://github.com/slim-bean/pi-context-inspector.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/slim-bean/pi-context-inspector.git"
+  },
   "homepage": "https://github.com/slim-bean/pi-context-inspector#readme",
-  "bugs": { "url": "https://github.com/slim-bean/pi-context-inspector/issues" },
+  "bugs": {
+    "url": "https://github.com/slim-bean/pi-context-inspector/issues"
+  },
   "type": "module",
-  "keywords": ["pi-package"],
-  "files": ["src", "README.md", "LICENSE"],
-  "pi": { "extensions": ["./src/index.ts"] },
-  "engines": { "node": ">=22.19.0" },
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "scripts": {
     "check": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
     "test:tui": "python3 test/tui-smoke.py"
   },
-  "dependencies": { "diff": "^8.0.2" },
+  "dependencies": {
+    "diff": "^9.0.0"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1",
-    "@earendil-works/pi-tui": "0.85.1",
-    "@types/node": "^22.19.0",
+    "@earendil-works/pi-coding-agent": "^1.5.0",
+    "@earendil-works/pi-tui": "^1.5.0",
+    "@types/node": "^26.6.6",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   }
 }
