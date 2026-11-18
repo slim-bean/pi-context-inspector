@@ -137,6 +137,31 @@ test("hostile control sequences are shown literally, not executed", () => {
   assert.ok(output.includes("\\x1b]52;c;CLIPBOARD\\x07"));
 });
 
+test("provider HTML comments stay visible and copyable across Pi TUI rendering changes", () => {
+  // Pi 1.5.1+ hides comments in Markdown; this inspector must show actual context,
+  // not Markdown-rendered content that silently drops provider instructions.
+  const content = "before <!-- provider-only instruction --> after";
+  const view: Snapshot = { kind: "request", title: "request", description: "captured payload", sections: [
+    { id: "payload", title: "Provider instructions", source: "capture", status: "included", text: content, raw: { system: content } },
+  ] };
+  let action: InspectorAction | undefined;
+  const inspector = new Inspector([view], theme, kb, () => 30, () => {}, (value) => { action = value; });
+  inspector.render(130);
+  inspector.handleInput("\t"); // Narrow terminals show only the focused pane.
+  for (const width of [130, 70, 40]) {
+    inspector.invalidate();
+    const lines = inspector.render(width);
+    assert.ok(plain(lines).includes("<!--"), `Comment hidden at width ${width}`);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width));
+  }
+  inspector.handleInput("r");
+  assert.ok(plain(inspector.render(130)).includes(content));
+  inspector.handleInput("y");
+  assert.equal(action?.kind, "copy");
+  assert.equal(action?.section?.text, content);
+  assert.deepEqual(action?.section?.raw, { system: content });
+});
+
 test("untrusted titles, sources and descriptions cannot inject terminal rows", () => {
   const view: Snapshot = { kind: "tools", title: "tools", description: "bad\nheader\x1b]52;evil\x07", sections: [
     { id: "call", title: "tool\nname", status: "reference", source: "bad\nsource", text: "safe\ncontent", raw: {} },
