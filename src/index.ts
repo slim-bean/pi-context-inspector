@@ -94,8 +94,11 @@ export default function contextInspector(pi: ExtensionAPI): void {
 
   pi.registerCommand("context", {
     description: "Inspect context, profile tokens/tools and request growth, and edit saved summaries",
-    getArgumentCompletions: (prefix) => ["request", "diff", "stats", "growth", "edit", "undo", "export", "help"]
-      .filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
+    getArgumentCompletions(prefix) {
+      const items = ["request", "diff", "stats", "growth", "edit", "undo", "export", "help"]
+        .filter((value) => value.startsWith(prefix.trimStart())).map((value) => ({ value, label: value }));
+      return items.length ? items : null;
+    },
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") throw new Error("/context requires interactive TUI mode.");
       if (commandOpen) { ctx.ui.notify("Context inspector is already open.", "warning"); return; }
