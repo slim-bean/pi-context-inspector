@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { KeybindingsManager, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+import { Box, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import { Inspector, type InspectorAction } from "../src/inspector.ts";
 import { deltaTone, joinRich, paint, rich, shareBar, tokenTone, toned } from "../src/presentation.ts";
 import type { Snapshot } from "../src/snapshots.ts";
@@ -122,6 +122,35 @@ test("failed edit result renders red, wraps safely, and stays plain in raw/copy 
   const safe = paint(hostile.text, hostile.highlights, theme);
   assert.ok(safe.includes("\x1b[31m日本語\\x1b]52;c;bad\\x07\x1b[39m"));
   assert.equal(safe.includes("\x1b]52"), false);
+});
+
+test("host Box caching preserves prior frames across live updates, resize and theme invalidation", () => {
+  let revision = 0;
+  const changingTheme = { ...theme, fg: (tone: string, text: string) =>
+    `\x1b[${(colors[tone] ?? 35) + revision}m${text}\x1b[39m` } as Theme;
+  const snapshot = (text: string): Snapshot => ({ kind: "tools", title: "Tools", description: "", sections: [
+    { id: "stable", title: "result", source: "reference", status: "reference", raw: {}, ...toned(text, "error") },
+  ] });
+  const inspector = new Inspector([snapshot("before 日本語")], changingTheme, kb, () => 30, () => {}, () => {});
+  const box = new Box(1, 0);
+  box.addChild(inspector);
+  const before = box.render(100);
+  const saved = [...before];
+  assert.ok(before.join("\n").includes("before 日本語"));
+  inspector.updateSnapshots([snapshot("after 日本語")]);
+  const after = box.render(100);
+  assert.ok(after.join("\n").includes("after 日本語"));
+  assert.ok(!after.join("\n").includes("before 日本語"));
+  assert.deepEqual(before, saved, "new frames must not mutate previously rendered host output");
+  for (const width of [40, 100, 20, 100]) {
+    assert.ok(box.render(width).every((line) => visibleWidth(line) <= width));
+  }
+  revision = 60;
+  box.invalidate();
+  const recolored = box.render(100).join("\n");
+  assert.ok(recolored.includes("\x1b[91mafter 日本語\x1b[39m"));
+  assert.ok(!recolored.includes("\x1b[31m"));
+  inspector.dispose();
 });
 
 test("growth colors survive selection and filtering while text remains searchable", () => {
